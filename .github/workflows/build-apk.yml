@@ -1,0 +1,44 @@
+name: Build LibreTV Cast APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: "LibreTV 站点地址（投屏版 WebView 加载的默认首页）"
+        required: false
+        default: "https://tv.bagiinlink.eu.org"
+  push:
+    branches: [main, master]
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle 8.5
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.5"
+
+      - name: Generate Android project
+        run: python3 setup_project.py --url "${{ github.event.inputs.server_url || 'https://tv.bagiinlink.eu.org' }}"
+
+      - name: Build signed release APK
+        run: gradle assembleRelease --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreTV-Cast-Android-APK
+          path: app/build/outputs/apk/release/*.apk
