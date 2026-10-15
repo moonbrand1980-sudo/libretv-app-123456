@@ -85,8 +85,8 @@ android {
         applicationId "__PKG__"
         minSdk 26          // Android 8.0（自适应图标需要 26+）
         targetSdk 34
-        versionCode 1
-        versionName "1.0.0"
+        versionCode 3
+        versionName "1.2.0"
     }
 
     signingConfigs {
@@ -119,6 +119,8 @@ ANDROID_MANIFEST = """<?xml version="1.0" encoding="utf-8"?>
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:allowBackup="true"
@@ -149,7 +151,7 @@ STRINGS_XML = """<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">LibreTV 投屏版</string>
     <string name="default_server_url">__DEFAULT_URL__</string>
-    <string name="help_text">投屏三步：\\n1. 手机和电视连同一个 WiFi；\\n2. 电视端打开「投屏 / 多屏互动 / 无线投屏」（各品牌叫法不同）；\\n3. 手机下拉通知栏 → 点「投屏 / Smart View / 无线投屏」→ 选中电视。\\n\\n投屏成功后回到本 App 正常播放即可，画面和声音会走电视。\\n\\n小贴士：\\n· 电视端有浏览器的话，也可以直接在电视上打开当前服务器地址观看；\\n· 投屏时不要锁屏；\\n· 部分电视只支持镜像，画面比例可在播放器里调整。</string>
+    <string name="help_text">直连投屏流程：\\n1. 手机和电视连同一个 WiFi；\\n2. 在本 App 播放视频，播放器控制条右侧会出现「投屏」按钮；\\n3. 点「投屏」→ 自动搜索局域网电视（海信 / 小米 / TCL / 当贝等 DLNA 设备）→ 选中电视即开始播放，无需任何第三方软件。\\n\\n说明：\\n· 长按「投屏」按钮可打开功能菜单（切换服务器 / 横竖屏 / 清缓存等）；\\n· 搜不到电视时，确认电视已开启「DLNA / 多屏互动 / 投屏」开关（各品牌叫法不同）；\\n· 也可以选「用其他应用播放」，交给 VLC / Web Video Caster；\\n· 投屏开始后可锁屏或退出本 App，电视独立播放。\\n\\n· 投屏时手机和电视请勿开热点隔离或访客网络。</string>
 </resources>
 """
 
@@ -211,18 +213,39 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
+import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
-import android.view.Gravity;
+import android.util.Xml;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.Toast;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * LibreTV 投屏版：WebView 壳 + 投屏菜单。
@@ -237,8 +260,53 @@ public class MainActivity extends Activity {
     private WebView web;
     private View customView;
     private WebChromeClient.CustomViewCallback customCb;
+    private volatile String lastMediaUrl;
     private String serverUrl;
     private SharedPreferences prefs;
+
+    // ---- DLNA 直连投屏状态 ----
+    private String activeCastName;
+    private String activeCastControlUrl;
+    private WifiManager.MulticastLock multicastLock;
+
+    /** 从页面里抓当前视频的真实直链（ArtPlayer / hls.js / 原生 video 逐级尝试） */
+    private static final String JS_EXTRACT_VIDEO =
+            "(function(){function http(u){return (u && /^https?:/i.test(u)) ? u : '';}"
+            + "try{if(window.art&&window.art.video){var a=http(window.art.video.src||window.art.video.currentSrc);if(a)return a;}}catch(e){}"
+            + "try{if(window.hls&&window.hls.url){var h=http(window.hls.url);if(h)return h;}}catch(e){}"
+            + "try{var vs=document.querySelectorAll('video');for(var i=0;i<vs.length;i++){var v=vs[i];var u=http(v.currentSrc||v.src);if(u)return u;}"
+            + "var s=document.querySelector('video source');if(s){var su=http(s.src);if(su)return su;}}catch(e){}"
+            + "return '';})()";
+
+    /** 注入网页的「投屏」按钮：只有视频出现时才有；ArtPlayer 挂控制条右侧，通用场景挂在视频容器右上角 */
+    private static final String JS_INJECT_BUTTON =
+            "(function(){"
+            + "if(window.__ltvCastTimer){return;}"
+            + "window.__ltvCastTimer=setInterval(function(){try{"
+            + "var v=document.querySelector('video');"
+            + "var btn=document.getElementById('__ltv_cast');"
+            + "if(!v){if(btn&&btn.parentNode){btn.parentNode.removeChild(btn);}return;}"
+            + "var host=document.querySelector('.art-controls-right')||document.querySelector('.art-controls');"
+            + "var floating=true;"
+            + "if(host){floating=false;}else{host=v.parentElement||document.body;}"
+            + "if(!btn){"
+            + "btn=document.createElement('button');"
+            + "btn.id='__ltv_cast';btn.textContent='投屏';"
+            + "btn.__base='padding:4px 10px;margin-left:6px;border-radius:4px;border:1px solid rgba(255,255,255,.35);background:rgba(0,0,0,.45);color:#fff;font-size:12px;line-height:1.4;cursor:pointer;';"
+            + "var pressT=null,moved=false,px=0,py=0;"
+            + "btn.addEventListener('touchstart',function(e){e.stopPropagation();var t=e.touches[0];px=t.clientX;py=t.clientY;moved=false;"
+            + "pressT=setTimeout(function(){pressT=null;try{window.AndroidBridge.openMenu();}catch(err){}},650);},{passive:true});"
+            + "btn.addEventListener('touchmove',function(e){e.stopPropagation();var t=e.touches[0];"
+            + "if(Math.abs(t.clientX-px)>12||Math.abs(t.clientY-py)>12){moved=true;if(pressT){clearTimeout(pressT);pressT=null;}}},{passive:true});"
+            + "btn.addEventListener('touchend',function(e){e.stopPropagation();if(pressT){clearTimeout(pressT);pressT=null;}"
+            + "if(!moved){try{window.AndroidBridge.smartCast();}catch(err){}}},{passive:true});"
+            + "btn.addEventListener('click',function(e){e.stopPropagation();e.preventDefault();try{window.AndroidBridge.smartCast();}catch(err){}});"
+            + "}"
+            + "if(btn.parentNode!==host){"
+            + "host.appendChild(btn);"
+            + "btn.style.cssText=btn.__base+(floating?'position:absolute;right:12px;bottom:64px;z-index:99999;':'z-index:9999;');"
+            + "}"
+            + "}catch(e){}},900);})()";
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -267,7 +335,24 @@ public class MainActivity extends Activity {
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
                 return false; // 全部在应用内打开
             }
+
+            @Override
+            public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                // 记录页面加载过的视频直链（hls.js 播放时 video.src 是 blob:，只能从这里抓）
+                String u = request.getUrl().toString();
+                if (isMediaUrl(u)) {
+                    lastMediaUrl = u;
+                }
+                return null;
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                // 每次页面加载完，注入跟随视频出现的「投屏」按钮
+                view.evaluateJavascript(JS_INJECT_BUTTON, null);
+            }
         });
+        web.addJavascriptInterface(new Bridge(), "AndroidBridge");
         web.setWebChromeClient(new WebChromeClient() {
             @Override
             public void onShowCustomView(View view, CustomViewCallback callback) {
@@ -280,6 +365,8 @@ public class MainActivity extends Activity {
                 web.setVisibility(View.GONE);
                 root.addView(view, new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                // 视频全屏时自动横屏
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
                 enterImmersive();
             }
 
@@ -291,22 +378,6 @@ public class MainActivity extends Activity {
 
         root.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-        // 悬浮「投屏」按钮
-        Button castBtn = new Button(this);
-        castBtn.setText("投屏");
-        FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        bp.gravity = Gravity.BOTTOM | Gravity.END;
-        bp.rightMargin = dp(16);
-        bp.bottomMargin = dp(28);
-        root.addView(castBtn, bp);
-        castBtn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showCastMenu();
-            }
-        });
 
         setContentView(root);
 
@@ -320,8 +391,10 @@ public class MainActivity extends Activity {
     /** 投屏菜单：系统投屏入口 / 切换服务器 / 刷新 / 清缓存 / 说明 */
     private void showCastMenu() {
         final String[] items = new String[]{
-                "📺 打开系统投屏设置（推荐）",
+                "🚀 投屏当前视频（搜索电视）",
+                "📺 打开系统投屏设置（镜像）",
                 "🔗 切换 LibreTV 服务器地址",
+                "🔁 横屏 / 竖屏切换",
                 "🔄 刷新页面",
                 "🧹 清除缓存",
                 "❓ 投屏使用说明"
@@ -331,15 +404,21 @@ public class MainActivity extends Activity {
                 .setItems(items, (dialog, which) -> {
                     switch (which) {
                         case 0:
-                            openSystemCastSettings();
+                            smartCast();
                             break;
                         case 1:
-                            promptServerUrl();
+                            openSystemCastSettings();
                             break;
                         case 2:
-                            web.reload();
+                            promptServerUrl();
                             break;
                         case 3:
+                            toggleOrientation();
+                            break;
+                        case 4:
+                            web.reload();
+                            break;
+                        case 5:
                             web.clearCache(true);
                             toast("已清除缓存");
                             break;
@@ -350,6 +429,301 @@ public class MainActivity extends Activity {
                 })
                 .setNegativeButton("关闭", null)
                 .show();
+    }
+
+    /** 智能投屏：抓取当前视频直链 → 局域网搜索 DLNA 电视 → 直连播放；搜不到再退回外部应用 */
+    private void smartCast() {
+        web.evaluateJavascript(JS_EXTRACT_VIDEO, new android.webkit.ValueCallback<String>() {
+            @Override
+            public void onReceiveValue(String value) {
+                String u = value == null ? "" : value.replaceAll("^\"|\"$", "").trim();
+                if (u.length() == 0 && lastMediaUrl != null) {
+                    u = lastMediaUrl; // 兜底：用最近拦截到的视频直链
+                }
+                if (u.length() == 0) {
+                    toast("未捕获到视频地址，请先开始播放视频");
+                    return;
+                }
+                showDevicePicker(u);
+            }
+        });
+    }
+
+    // ==================== DLNA 直连投屏 ====================
+
+    /** SSDP 搜索局域网内的 DLNA 电视（MediaRenderer），弹出选择列表 */
+    private void showDevicePicker(final String videoUrl) {
+        toast("正在搜索局域网电视…");
+        final List<String[]> devices = new ArrayList<>();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                dlnaDiscover(devices, 3500);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        List<String> options = new ArrayList<>();
+                        for (String[] d : devices) {
+                            options.add("📺 " + d[0]);
+                        }
+                        if (activeCastControlUrl != null) {
+                            options.add("⏹ 停止投屏（" + activeCastName + "）");
+                        }
+                        options.add("🔁 用其他应用播放（VLC / Web Video Caster）");
+                        options.add("🔄 重新搜索");
+                        options.add("❓ 搜不到电视？看提示");
+                        final String[] arr = options.toArray(new String[0]);
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("选择投屏设备（找到 " + devices.size() + " 台）")
+                                .setItems(arr, (dialog, which) -> {
+                                    String opt = arr[which];
+                                    if (opt.startsWith("📺")) {
+                                        String[] d = devices.get(which);
+                                        activeCastName = d[0];
+                                        activeCastControlUrl = d[1];
+                                        dlnaPlay(d[1], videoUrl, d[0]);
+                                    } else if (opt.startsWith("⏹")) {
+                                        final String ctl = activeCastControlUrl;
+                                        dlnaControlAsync(ctl, "Stop", "<InstanceID>0</InstanceID>");
+                                        activeCastName = null;
+                                        activeCastControlUrl = null;
+                                        toast("已停止投屏");
+                                    } else if (opt.startsWith("🔁")) {
+                                        castVideo(videoUrl);
+                                    } else if (opt.startsWith("🔄")) {
+                                        showDevicePicker(videoUrl);
+                                    } else if (opt.startsWith("❓")) {
+                                        showHelp();
+                                    }
+                                })
+                                .setNegativeButton("取消", null)
+                                .show();
+                    }
+                });
+            }
+        }, "dlna-discover").start();
+    }
+
+    /** 把视频推给电视：SetAVTransportURI + Play（后台线程） */
+    private void dlnaPlay(final String controlUrl, final String videoUrl, final String name) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String body = "<InstanceID>0</InstanceID><CurrentURI>" + xmlEscape(videoUrl)
+                        + "</CurrentURI><CurrentURIMetaData></CurrentURIMetaData>";
+                boolean ok = dlnaControl(controlUrl, "SetAVTransportURI", body);
+                if (ok) {
+                    ok = dlnaControl(controlUrl, "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>");
+                }
+                final boolean done = ok;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        toast(done ? "🎬 已投屏到 " + name
+                                : "投屏失败：电视拒绝了请求，请确认电视已开启「DLNA / 多屏互动 / 投屏」开关");
+                    }
+                });
+            }
+        }, "dlna-play").start();
+    }
+
+    private void dlnaControlAsync(final String controlUrl, final String action, final String argsXml) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                dlnaControl(controlUrl, action, argsXml);
+            }
+        }, "dlna-ctl").start();
+    }
+
+    /** SSDP 组播搜索 + 拉取设备描述 XML，结果放入 devices（[friendlyName, AVTransport controlURL]） */
+    private void dlnaDiscover(List<String[]> devices, long timeoutMs) {
+        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+        if (wm != null) {
+            multicastLock = wm.createMulticastLock("ltv-dlna");
+            multicastLock.setReferenceCounted(false);
+            multicastLock.acquire();
+        }
+        try {
+            DatagramSocket socket = new DatagramSocket();
+            socket.setSoTimeout(600);
+            byte[] msearch = ("M-SEARCH * HTTP/1.1\r\n"
+                    + "HOST: 239.255.255.250:1900\r\n"
+                    + "MAN: \"ssdp:discover\"\r\n"
+                    + "MX: 2\r\n"
+                    + "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+            InetAddress group = InetAddress.getByName("239.255.255.250");
+            Set<String> seen = new HashSet<>();
+            long deadline = System.currentTimeMillis() + timeoutMs;
+            for (int i = 0; i < 3; i++) {
+                socket.send(new DatagramPacket(msearch, msearch.length, group, 1900));
+                try { Thread.sleep(120); } catch (InterruptedException ignored) { }
+            }
+            byte[] buf = new byte[2048];
+            while (System.currentTimeMillis() < deadline) {
+                DatagramPacket dp = new DatagramPacket(buf, buf.length);
+                try {
+                    socket.receive(dp);
+                } catch (java.net.SocketTimeoutException e) {
+                    continue;
+                } catch (Exception e) {
+                    break;
+                }
+                String resp = new String(dp.getData(), 0, dp.getLength(), StandardCharsets.UTF_8);
+                String location = headerValue(resp, "LOCATION");
+                if (location == null || !seen.add(location)) {
+                    continue;
+                }
+                String[] dev = fetchRenderer(location);
+                if (dev != null) {
+                    devices.add(dev);
+                }
+            }
+            socket.close();
+        } catch (Exception e) {
+            // WiFi 多播不可用 / 网络异常：留空设备列表
+        } finally {
+            if (multicastLock != null) {
+                try { multicastLock.release(); } catch (Exception ignored) { }
+            }
+        }
+    }
+
+    /** 拉取设备描述 XML，返回 [friendlyName, AVTransport controlURL]；非渲染设备返回 null */
+    private String[] fetchRenderer(String location) {
+        try {
+            String xml = httpGet(location, 3000);
+            String name = firstTag(xml, "friendlyName");
+            String controlUrl = null;
+            Matcher m = Pattern.compile("<service>.*?</service>", Pattern.DOTALL).matcher(xml);
+            while (m.find()) {
+                String svc = m.group();
+                if (svc.contains("AVTransport")) {
+                    controlUrl = firstTag(svc, "controlURL");
+                    break;
+                }
+            }
+            if (name == null || controlUrl == null) {
+                return null;
+            }
+            URL abs = new URL(new URL(location), controlUrl);
+            return new String[]{xmlUnescape(name), abs.toString()};
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 发送 AVTransport SOAP 控制命令，返回是否成功 */
+    private static boolean dlnaControl(String controlUrl, String action, String argsXml) {
+        try {
+            String soap = "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                    + "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\""
+                    + " s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+                    + "<s:Body><u:" + action + " xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">"
+                    + argsXml + "</u:" + action + "></s:Body></s:Envelope>";
+            HttpURLConnection conn = (HttpURLConnection) new URL(controlUrl).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setConnectTimeout(4000);
+            conn.setReadTimeout(4000);
+            conn.setDoOutput(true);
+            conn.setRequestProperty("Content-Type", "text/xml; charset=\"utf-8\"");
+            conn.setRequestProperty("SOAPACTION",
+                    "\"urn:schemas-upnp-org:service:AVTransport:1#" + action + "\"");
+            OutputStream os = conn.getOutputStream();
+            os.write(soap.getBytes(StandardCharsets.UTF_8));
+            os.close();
+            int code = conn.getResponseCode();
+            conn.disconnect();
+            return code >= 200 && code < 300;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static String httpGet(String url, int timeoutMs) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        BufferedReader r = new BufferedReader(
+                new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = r.readLine()) != null) {
+            sb.append(line).append('\n');
+        }
+        r.close();
+        conn.disconnect();
+        return sb.toString();
+    }
+
+    private static String headerValue(String resp, String key) {
+        for (String line : resp.split("\r\n")) {
+            int idx = line.indexOf(':');
+            if (idx > 0 && line.substring(0, idx).trim().equalsIgnoreCase(key)) {
+                return line.substring(idx + 1).trim();
+            }
+        }
+        return null;
+    }
+
+    private static String firstTag(String xml, String tag) {
+        Matcher m = Pattern.compile("<" + tag + "[^>]*>(.*?)</" + tag + ">", Pattern.DOTALL)
+                .matcher(xml);
+        return m.find() ? m.group(1).trim() : null;
+    }
+
+    private static String xmlUnescape(String s) {
+        return s.replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&");
+    }
+
+    private static String xmlEscape(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /** JS 桥：网页内「投屏」按钮回调到这里（点按=直连投屏，长按=菜单） */
+    private class Bridge {
+        @JavascriptInterface
+        public void smartCast() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    MainActivity.this.smartCast();
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void openMenu() {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    showCastMenu();
+                }
+            });
+        }
+    }
+
+    /** 通过 Android Intent 把视频直链交给外部投屏/播放应用（DLNA 搜不到时的退路） */
+    private void castVideo(String url) {
+        String mime = url.toLowerCase().contains(".m3u8") ? "application/x-mpegURL" : "video/*";
+        Intent it = new Intent(Intent.ACTION_VIEW);
+        it.setDataAndType(Uri.parse(url), mime);
+        try {
+            startActivity(Intent.createChooser(it, "选择投屏播放器（VLC / Web Video Caster 等）"));
+        } catch (Exception e) {
+            toast("未找到可用的投屏应用，请先安装 VLC 或 Web Video Caster");
+        }
+    }
+
+    /** 判断是否是视频直链（m3u8 / mpd / flv / mp4） */
+    private static boolean isMediaUrl(String url) {
+        if (url == null) {
+            return false;
+        }
+        String u = url.toLowerCase();
+        return u.contains(".m3u8") || u.contains(".mpd") || u.contains(".flv")
+                || u.contains(".mp4") || u.contains("/m3u8");
     }
 
     /** 一键跳转系统投屏设置页（各品牌 ROM 都会映射到各自的投屏/多屏互动页面） */
@@ -410,7 +784,21 @@ public class MainActivity extends Activity {
             customCb = null;
         }
         web.setVisibility(View.VISIBLE);
+        // 退出全屏后恢复跟随系统自动旋转
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+    }
+
+    /** 手动横竖屏切换（网页自身 CSS 全屏无法被系统感知时的兜底） */
+    private void toggleOrientation() {
+        int cur = getResources().getConfiguration().orientation;
+        if (cur == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+            toast("已切回竖屏（跟随系统）");
+        } else {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            toast("已切换横屏");
+        }
     }
 
     private void enterImmersive() {
@@ -431,19 +819,34 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        // 1) 系统 HTML5 全屏：先退出全屏
         if (customView != null) {
             exitCustomView();
             return;
         }
-        if (web.canGoBack()) {
-            web.goBack();
-            return;
-        }
-        new AlertDialog.Builder(this)
-                .setMessage("退出 LibreTV 投屏版？")
-                .setPositiveButton("退出", (dialog, which) -> finish())
-                .setNegativeButton("取消", null)
-                .show();
+        // 2) 网页自身全屏（CSS/播放器全屏）：尝试让页面退出全屏，其次返回上一页
+        web.evaluateJavascript(
+                "(function(){try{if(document.fullscreenElement||document.webkitFullscreenElement)"
+                        + "{(document.exitFullscreen||document.webkitExitFullscreen).call(document);return 'fs';}}catch(e){}"
+                        + "try{document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,which:27,bubbles:true}));}catch(e){}"
+                        + "return 'no';})()",
+                new android.webkit.ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String value) {
+                        if (value != null && value.contains("fs")) {
+                            return; // 页面已退出全屏，不再往下走
+                        }
+                        if (web.canGoBack()) {
+                            web.goBack();
+                            return;
+                        }
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setMessage("退出 LibreTV 投屏版？")
+                                .setPositiveButton("退出", (dialog, which) -> finish())
+                                .setNegativeButton("取消", null)
+                                .show();
+                    }
+                });
     }
 
     @Override
