@@ -85,8 +85,8 @@ android {
         applicationId "__PKG__"
         minSdk 26          // Android 8.0（自适应图标需要 26+）
         targetSdk 34
-        versionCode 13
-        versionName "1.7.0"
+        versionCode 14
+        versionName "1.7.1"
     }
 
     signingConfigs {
@@ -645,7 +645,7 @@ public class MainActivity extends Activity {
     /** 注入网页的「筛选」首页：OK猫影视风格全屏浏览页（类别 + 类型/地区/年份 + 海报墙 + 滚动加载 + 站内搜索 + 可设启动页）。
      *  v1.5.0：fetch 全部带 8s 超时防 loading 卡死；切换时 abort 旧请求；标签扩充；主页推荐源自动切到影视榜单。 */
     private static final String JS_INJECT_FILTER =
-            + "(function(){\n"
+            "(function(){\n"
             + "if(window.__ltvFilterInit){return;}\n"
             + "window.__ltvFilterInit=1;\n"
             + "/* ---------- 数据源：苹果CMS采集接口（原生支持 类型t/地区area/年份year 三维组合） ---------- */\n"
@@ -1487,8 +1487,9 @@ public class MainActivity extends Activity {
             headers.put("Content-Type", "application/json; charset=utf-8");
             WebResourceResponse resp = new WebResourceResponse("application/json", "utf-8",
                     new ByteArrayInputStream(body));
-            resp.setStatusCode(code > 0 ? code : 502);
-            resp.setReasonPhrase(code > 0 ? "OK" : "ERR");
+            // 注意：Android 的 WebResourceResponse 没有 setStatusCode / setReasonPhrase，
+            // 只有 setStatusCodeAndReasonPhrase(int, String)（API 21+）
+            resp.setStatusCodeAndReasonPhrase(code > 0 ? code : 502, code > 0 ? "OK" : "ERR");
             resp.setResponseHeaders(headers);
             return resp;
         } catch (Exception e) {
