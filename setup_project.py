@@ -85,8 +85,8 @@ android {
         applicationId "__PKG__"
         minSdk 26          // Android 8.0（自适应图标需要 26+）
         targetSdk 34
-        versionCode 12
-        versionName "1.6.2"
+        versionCode 13
+        versionName "1.7.0"
     }
 
     signingConfigs {
@@ -554,6 +554,9 @@ import android.widget.FrameLayout;
 import android.widget.Toast;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.DatagramPacket;
@@ -564,8 +567,10 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -578,6 +583,9 @@ public class MainActivity extends Activity {
 
     private static final String PREFS = "cast_prefs";
     private static final String KEY_URL = "server_url";
+    /** 代理请求第三方接口时使用的移动端 UA（豆瓣等站点挑 UA） */
+    private static final String PROXY_UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36"
+            + " (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
 
     private FrameLayout root;
     private WebView web;
@@ -637,283 +645,352 @@ public class MainActivity extends Activity {
     /** 注入网页的「筛选」首页：OK猫影视风格全屏浏览页（类别 + 类型/地区/年份 + 海报墙 + 滚动加载 + 站内搜索 + 可设启动页）。
      *  v1.5.0：fetch 全部带 8s 超时防 loading 卡死；切换时 abort 旧请求；标签扩充；主页推荐源自动切到影视榜单。 */
     private static final String JS_INJECT_FILTER =
-            "(function(){"
-            + "if(window.__ltvFilterInit){return;}"
-            + "window.__ltvFilterInit=1;"
-            + "var CONF={"
-            + "movie:{'类型':['热门','最新','经典','豆瓣高分','冷门佳片','动作','喜剧','爱情','科幻','悬疑','恐怖','治愈','动画','纪录片','奇幻','冒险','战争','音乐','传记','历史','运动'],"
-            + "'地区':['华语','欧美','韩国','日本'],"
-            + "'年份':['2026','2025','2024','2023','2022','2021','2020','2019','2018']},"
-            + "tv:{'类型':['热门','最新','经典','豆瓣高分','综艺','纪录片','日本动画','都市','悬疑','武侠','喜剧','爱情','古装','奇幻'],"
-            + "'地区':['美剧','英剧','韩剧','日剧','国产剧','港剧','泰剧'],"
-            + "'年份':['2026','2025','2024','2023','2022','2021','2020','2019','2018']}"
-            + "};"
-            + "var curType='movie',curSel={},pageStart=0,loading=false,hasMore=true,mode='filter',loadCtl=null,cache={},retried=false,curTotal=0,rexSeq=0,pendAppend=false,pendCk='';"
-            + "function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}"
-            + "function videoOn(){return !!document.querySelector('video');}"
-            + "function xfetch(url,opt){"
-            + "var c=new AbortController();var t=setTimeout(function(){try{c.abort();}catch(e){}},8000);"
-            + "var o=opt||{};o.signal=c.signal;"
-            + "return fetch(url,o).then(function(r){clearTimeout(t);return r;},function(e){clearTimeout(t);throw e;});"
-            + "}"
-            + "function abortLoad(){if(loadCtl){try{loadCtl.abort();}catch(e){}}loadCtl=null;}"
-            + "setInterval(function(){"
-            + "var f=document.getElementById('__ltv_filter');"
-            + "if(videoOn()){if(f&&f.parentNode){f.parentNode.removeChild(f);}return;}"
-            + "if(!document.body||f){return;}"
-            + "f=document.createElement('button');f.id='__ltv_filter';f.textContent='筛选';"
-            + "f.style.cssText='position:fixed;right:14px;bottom:24px;z-index:99998;padding:6px 14px;border-radius:16px;border:1px solid rgba(255,255,255,.35);background:rgba(18,18,26,.75);color:#fff;font-size:13px;cursor:pointer;';"
-            + "f.addEventListener('click',function(e){e.stopPropagation();openPanel();});"
-            + "document.body.appendChild(f);"
-            + "},900);"
-            + "function openPanel(){"
-            + "if(document.getElementById('__ltv_ovl')){return;}"
-            + "var ovl=document.createElement('div');ovl.id='__ltv_ovl';"
-            + "ovl.style.cssText='position:fixed;inset:0;z-index:99999;background:#0f0f16;overflow-y:auto;-webkit-overflow-scrolling:touch;';"
-            + "document.body.appendChild(ovl);"
-            + "var head=document.createElement('div');"
-            + "head.style.cssText='position:sticky;top:0;background:#14141e;border-bottom:1px solid #26263a;padding:10px 12px;z-index:2;';"
-            + "ovl.appendChild(head);"
-            + "var grid=document.createElement('div');"
-            + "grid.style.cssText='display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:12px;';"
-            + "ovl.appendChild(grid);"
-            + "var tip=document.createElement('div');"
-            + "tip.style.cssText='color:#8a8aa0;font-size:12px;text-align:center;padding:14px;';"
-            + "ovl.appendChild(tip);"
-            + "ovl.addEventListener('scroll',function(){"
-            + "if(mode!=='filter'||loading||!hasMore){return;}"
-            + "if(ovl.scrollTop+ovl.clientHeight>=ovl.scrollHeight-500){loadPage(true);}"
-            + "});"
-            + "buildHead(head);buildFilters(head);resetLoad();"
-            + "}"
-            + "function buildTabs(head){"
-            + "var old=document.getElementById('__ltv_tabs');if(old&&old.parentNode){old.parentNode.removeChild(old);}"
-            + "var tabs=document.createElement('div');tabs.id='__ltv_tabs';"
-            + "tabs.style.cssText='display:flex;gap:8px;margin-top:10px;';"
-            + "[['movie','电影'],['tv','剧集']].forEach(function(pr){"
-            + "var b=document.createElement('button');b.textContent=pr[1];var on=curType===pr[0];"
-            + "b.style.cssText='flex:1;padding:9px;border-radius:8px;font-size:14px;cursor:pointer;border:none;background:'+(on?'#e91e63':'#1e1e2c')+';color:'+(on?'#fff':'#bbb')+';';"
-            + "b.addEventListener('click',function(){if(curType!==pr[0]){curType=pr[0];curSel={};mode='filter';buildTabs(head);buildFilters(head);resetLoad();}});"
-            + "tabs.appendChild(b);"
-            + "});"
-            + "var sr=document.getElementById('__ltv_srow');"
-            + "if(sr){head.insertBefore(tabs,sr);}else{head.appendChild(tabs);}"
-            + "}"
-            + "function buildHead(head){"
-            + "var r1=document.createElement('div');"
-            + "r1.style.cssText='display:flex;align-items:center;gap:8px;';"
-            + "var close=document.createElement('button');close.textContent='\\u2715';"
-            + "close.style.cssText='background:none;border:none;color:#999;font-size:20px;cursor:pointer;padding:0 4px;';"
-            + "close.addEventListener('click',function(){var o=document.getElementById('__ltv_ovl');if(o){o.remove();}});"
-            + "r1.appendChild(close);"
-            + "var title=document.createElement('span');"
-            + "title.textContent='\\uD83C\\uDFAC 影片筛选';"
-            + "title.style.cssText='color:#fff;font-size:16px;font-weight:600;flex:1;';"
-            + "r1.appendChild(title);"
-            + "var auto=document.createElement('button');"
-            + "var isAuto=false;try{isAuto=localStorage.getItem('__ltvAutoFilter')==='1';}catch(e){}"
-            + "auto.textContent=isAuto?'\\u2605 启动页':'设为启动页';"
-            + "auto.style.cssText='padding:4px 10px;border-radius:12px;font-size:11px;cursor:pointer;border:1px solid '+(isAuto?'#e91e63':'#333')+';background:'+(isAuto?'#e91e63':'#1e1e2c')+';color:#bbb;';"
-            + "auto.addEventListener('click',function(){"
-            + "var on=false;"
-            + "try{on=localStorage.getItem('__ltvAutoFilter')==='1';"
-            + "if(on){localStorage.removeItem('__ltvAutoFilter');}else{localStorage.setItem('__ltvAutoFilter','1');}}catch(e){on=!on;}"
-            + "auto.textContent=on?'\\u2605 启动页':'设为启动页';"
-            + "auto.style.border=on?'1px solid #e91e63':'1px solid #333';"
-            + "auto.style.background=on?'#e91e63':'#1e1e2c';"
-            + "});"
-            + "r1.appendChild(auto);head.appendChild(r1);"
-            + "buildTabs(head);"
-            + "var sr=document.createElement('div');sr.id='__ltv_srow';sr.style.cssText='display:flex;gap:8px;margin-top:10px;';"
-            + "var inp=document.createElement('input');inp.placeholder='搜索片名…';"
-            + "inp.style.cssText='flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2a2a3a;background:#1e1e2c;color:#fff;font-size:13px;outline:none;';"
-            + "var sb=document.createElement('button');sb.textContent='搜索';"
-            + "sb.style.cssText='padding:8px 16px;border-radius:8px;border:none;background:#e91e63;color:#fff;font-size:13px;cursor:pointer;';"
-            + "function doSearchClick(){var q=(inp.value||'').trim();if(q){mode='search';hasMore=false;abortLoad();searchGrid(q);}}"
-            + "sb.addEventListener('click',doSearchClick);"
-            + "inp.addEventListener('keydown',function(e){if(e.key==='Enter'){doSearchClick();}});"
-            + "sr.appendChild(inp);sr.appendChild(sb);head.appendChild(sr);"
-            + "}"
-            + "function curTagsStr(){"
-            + "var arr=[];Object.keys(curSel).forEach(function(k){(curSel[k]||[]).forEach(function(t){arr.push(t);});});"
-            + "return arr.join(',');"
-            + "}"
-            + "function buildFilters(head){"
-            + "var old=document.getElementById('__ltv_frows');if(old&&old.parentNode){old.parentNode.removeChild(old);}"
-            + "var box=document.createElement('div');box.id='__ltv_frows';"
-            + "box.style.cssText='margin-top:10px;';"
-            + "var conf=CONF[curType];"
-            + "Object.keys(conf).forEach(function(rowName){"
-            + "if(!curSel[rowName]){curSel[rowName]=[];}"
-            + "var row=document.createElement('div');"
-            + "row.style.cssText='display:flex;gap:6px;align-items:flex-start;margin:6px 0;';"
-            + "var lab=document.createElement('span');lab.textContent=rowName;"
-            + "lab.style.cssText='color:#8a8aa0;font-size:12px;min-width:34px;line-height:26px;';"
-            + "row.appendChild(lab);"
-            + "var wrap=document.createElement('div');"
-            + "wrap.style.cssText='display:flex;gap:6px;overflow-x:auto;white-space:nowrap;padding-bottom:2px;';"
-            + "var allBtn=document.createElement('button');allBtn.textContent='全部';"
-            + "var allOn=curSel[rowName].length===0;"
-            + "allBtn.style.cssText='flex:0 0 auto;padding:4px 12px;border-radius:13px;font-size:12px;cursor:pointer;border:1px solid '+(allOn?'#e91e63':'#333')+';background:'+(allOn?'#e91e63':'#1e1e2c')+';color:'+(allOn?'#fff':'#bbb')+';';"
-            + "allBtn.addEventListener('click',function(){curSel[rowName]=[];mode='filter';buildFilters(head);resetLoad();});"
-            + "wrap.appendChild(allBtn);"
-            + "conf[rowName].forEach(function(t){"
-            + "var on=curSel[rowName].indexOf(t)>=0;"
-            + "var b=document.createElement('button');b.textContent=t;"
-            + "b.style.cssText='flex:0 0 auto;padding:4px 12px;border-radius:13px;font-size:12px;cursor:pointer;border:1px solid '+(on?'#e91e63':'#333')+';background:'+(on?'#e91e63':'#1e1e2c')+';color:'+(on?'#fff':'#bbb')+';';"
-            + "b.addEventListener('click',function(){"
-            + "var ix=curSel[rowName].indexOf(t);if(ix>=0){curSel[rowName].splice(ix,1);}else{curSel[rowName].push(t);}"
-            + "mode='filter';buildFilters(head);resetLoad();});"
-            + "wrap.appendChild(b);"
-            + "});"
-            + "row.appendChild(wrap);box.appendChild(row);"
-            + "});"
-            + "head.appendChild(box);"
-            + "}"
-            + "function ovlParts(){"
-            + "var ovl=document.getElementById('__ltv_ovl');"
-            + "if(!ovl){return null;}"
-            + "var divs=ovl.children;"
-            + "return {grid:divs[1],tip:divs[2]};"
-            + "}"
-            + "function resetLoad(){pageStart=0;hasMore=true;mode='filter';retried=false;curTotal=0;rexSeq++;abortLoad();loadPage(false);}"
-            + "function renderList(grid,list){"
-            + "grid.innerHTML='';"
-            + "list.forEach(function(it){grid.appendChild(makeCard(it));});"
-            + "}"
-            + "window.__ltvRexxCb=function(seq,ok,text){"
-            + "if(parseInt(seq,10)!==rexSeq){return;}"
-            + "loading=false;var p=ovlParts();if(!p){return;}"
-            + "var list=[],total=0;"
-            + "if(ok&&text){try{var d=JSON.parse(text);list=(d&&d.items)||[];total=(d&&d.total)||0;}catch(e){}}"
-            + "if(!Array.isArray(list)){list=[];}"
-            + "for(var i=list.length-1;i>=0;i--){if(!list[i]||!list[i].title){list.splice(i,1);}}"
-            + "if(!list.length&&ok&&!retried){"
-            + "retried=true;p.tip.textContent='加载不顺利，自动重试中…';"
-            + "setTimeout(function(){loadPage(pendAppend);},900);return;"
-            + "}"
-            + "if(!list.length){loadDoubanFallback(pendAppend,pendCk,p);return;}"
-            + "retried=false;curTotal=total;"
-            + "if(!pendAppend){cache[pendCk]=list;renderList(p.grid,list);}"
-            + "else{list.forEach(function(it){p.grid.appendChild(makeCard(it));});}"
-            + "pageStart+=list.length;"
-            + "hasMore=total>0?(pageStart<total):(list.length>=20);"
-            + "p.tip.textContent=hasMore?'上滑加载更多':'没有更多了';"
-            + "};"
-            + "function loadDoubanFallback(append,ck,p){"
-            + "var tag='热门';var ts=curTagsStr();"
-            + "if(ts){var arr=ts.split(',');tag=arr[arr.length-1];}"
-            + "var ctl=new AbortController();loadCtl=ctl;var sig=ctl.signal;"
-            + "p.tip.textContent='豆瓣通道不顺，切换备用源…';"
-            + "var url='/api/douban?type='+encodeURIComponent(curType)+'&tag='+encodeURIComponent(tag)+'&pageStart='+pageStart+'&pageSize=24';"
-            + "fetch(url,{credentials:'include',signal:sig})"
-            + ".then(function(r){return r.json();}).then(function(d){"
-            + "var list=(d&&(d.list||d.subjects||d.items||d.data))||[];"
-            + "if(!Array.isArray(list)){list=[];}"
-            + "if(!list.length){hasMore=false;p.tip.textContent='该筛选暂无收录，换个条件试试';return;}"
-            + "if(!append){cache[ck]=list;renderList(p.grid,list);}"
-            + "else{list.forEach(function(it){p.grid.appendChild(makeCard(it));});}"
-            + "hasMore=list.length>=24;pageStart+=list.length;"
-            + "p.tip.textContent=hasMore?'上滑加载更多':'没有更多了';"
-            + "}).catch(function(e){"
-            + "if(e&&e.name==='AbortError'){return;}"
-            + "p.tip.textContent='加载失败：'+esc(e.message||e);});"
-            + "}"
-            + "function loadPage(append){"
-            + "if(loading){return;}loading=true;abortLoad();rexSeq++;"
-            + "var p=ovlParts();"
-            + "if(!p){loading=false;return;}"
-            + "var tags=curTagsStr();"
-            + "var ck=curType+'|'+tags;"
-            + "if(!append&&cache[ck]){"
-            + "renderList(p.grid,cache[ck]);"
-            + "hasMore=cache[ck].length>=20;pageStart=cache[ck].length;"
-            + "p.tip.textContent=hasMore?'上滑加载更多':'没有更多了';loading=false;return;"
-            + "}"
-            + "if(!append){p.grid.innerHTML='';}"
-            + "p.tip.textContent='加载中…';"
-            + "pendAppend=append;pendCk=ck;"
-            + "var seq=rexSeq;"
-            + "try{window.AndroidBridge.doubanFetch(curType,tags,String(pageStart),'20',String(seq));"
-            + "setTimeout(function(){if(loading&&seq===rexSeq){loading=false;}},15000);}"
-            + "catch(e){rexSeq--;loadDoubanFallback(append,ck,p);}"
-            + "}"
-            + "function makeCard(it){"
-            + "var t=it.title||it.name||'';"
-            + "var img=it.poster||it.cover||it.img||'';"
-            + "if(!img&&it.pic){img=(typeof it.pic==='object')?(it.pic.large||it.pic.normal||''):it.pic;}"
-            + "if(img){img=img.replace(/img\\d+\\.doubanio\\.com/g,'img.doubanio.cmliussss.net');}"
-            + "var rate=typeof it.rate==='object'?(it.rate.value||''):(it.rate||'');"
-            + "if(!rate&&it.rating){rate=(typeof it.rating==='object')?(it.rating.value||''):it.rating;}"
-            + "var card=document.createElement('div');card.style.cssText='cursor:pointer;';"
-            + "card.innerHTML='<div style=\"position:relative\"><img src=\"'+esc(img)+'\" loading=\"lazy\" style=\"width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:8px;background:#222\">'"
-            + "+(rate?'<span style=\"position:absolute;right:4px;top:4px;background:rgba(0,0,0,.7);color:#f5c518;font-size:11px;padding:1px 4px;border-radius:4px\">\\u2605'+esc(rate)+'</span>':'')+'</div>'"
-            + "+'<div style=\"color:#ddd;font-size:12px;margin-top:4px;height:30px;line-height:15px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden\">'+esc(t)+'</div>';"
-            + "card.addEventListener('click',function(){playTitle(t);});"
-            + "return card;"
-            + "}"
-            + "function searchGrid(q){"
-            + "var p=ovlParts();if(!p){return;}"
-            + "p.grid.innerHTML='';p.tip.textContent='搜索中…';"
-            + "xfetch('/api/search',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})})"
-            + ".then(function(r){return r.json();}).then(function(d){"
-            + "var list=(d&&(d.regular_results||d.results||d.list||d.data))||[];"
-            + "if(!Array.isArray(list)){list=[];}"
-            + "if(!list.length){p.tip.textContent='未找到「'+q+'」的片源';return;}"
-            + "p.tip.textContent='找到 '+list.length+' 个结果';"
-            + "list.forEach(function(it){"
-            + "var src=it.source||it.sourceKey||'';var id=it.vod_id||it.id||'';"
-            + "var t=it.vod_name||it.title||q;"
-            + "var img=it.vod_pic||it.pic||it.cover||'';"
-            + "var sn=it.source_name||'';"
-            + "var card=document.createElement('div');card.style.cssText='cursor:pointer;';"
-            + "card.innerHTML='<div style=\"position:relative\"><img src=\"'+esc(img)+'\" loading=\"lazy\" style=\"width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:8px;background:#222\">'"
-            + "+(sn?'<span style=\"position:absolute;left:4px;top:4px;background:rgba(233,30,99,.85);color:#fff;font-size:10px;padding:1px 5px;border-radius:4px\">'+esc(sn)+'</span>':'')+'</div>'"
-            + "+'<div style=\"color:#ddd;font-size:12px;margin-top:4px;height:30px;line-height:15px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden\">'+esc(t)+'</div>';"
-            + "card.addEventListener('click',function(){if(src&&id){watch(src,id,t);}});"
-            + "p.grid.appendChild(card);"
-            + "});"
-            + "}).catch(function(e){p.tip.textContent='搜索失败：'+esc(e.message||e);});"
-            + "}"
-            + "function playTitle(title){"
-            + "if(!title){return;}"
-            + "var p=ovlParts();"
-            + "if(p){p.tip.textContent='正在找片源：'+title;}"
-            + "xfetch('/api/search',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:title})})"
-            + ".then(function(r){return r.json();}).then(function(d){"
-            + "var list=(d&&(d.regular_results||d.results||d.list||d.data))||[];"
-            + "if(!Array.isArray(list)){list=[];}"
-            + "var hit=null;"
-            + "for(var i=0;i<list.length;i++){"
-            + "var it=list[i];var src=it.source||it.sourceKey||'';var id=it.vod_id||it.id||'';"
-            + "if(src&&id){hit=it;break;}"
-            + "}"
-            + "if(!hit){if(p){p.tip.textContent='未找到可播放的片源：'+title;}return;}"
-            + "var src=hit.source||hit.sourceKey||'';var id=hit.vod_id||hit.id||'';"
-            + "var t=hit.vod_name||hit.title||title;"
-            + "watch(src,id,t);"
-            + "}).catch(function(e){if(p){p.tip.textContent='搜索失败：'+esc(e.message||e);}});"
-            + "}"
-            + "function watch(src,id,t){"
-            + "var ovl=document.getElementById('__ltv_ovl');if(ovl){ovl.remove();}"
-            + "location.href='/watch?source='+encodeURIComponent(src)+'&id='+encodeURIComponent(id)+'&title='+encodeURIComponent(t);"
-            + "}"
-            + "try{if(localStorage.getItem('__ltvAutoFilter')==='1'&&!videoOn()&&(location.pathname==='/'||location.pathname==='/index.html')){openPanel();}}catch(e){}"
-            + "try{"
-            + "var isHome=(location.pathname==='/'||location.pathname==='/index.html');"
-            + "var tries=parseInt(sessionStorage.getItem('__ltvHomeFix')||'0',10);"
-            + "if(isHome&&tries<2){"
-            + "var raw=localStorage.getItem('libretv-settings');"
-            + "var obj=raw?JSON.parse(raw):null;"
-            + "var st=obj&&obj.state?obj.state:null;"
-            + "if(st&&st.recommendSource&&st.recommendSource!=='hot-list'){"
-            + "st.recommendSource='hot-list';st.recommendSourceTouched=true;"
-            + "localStorage.setItem('libretv-settings',JSON.stringify(obj));"
-            + "sessionStorage.setItem('__ltvHomeFix',String(tries+1));"
-            + "location.reload();"
-            + "}else{sessionStorage.setItem('__ltvHomeFix','done');}"
-            + "}"
-            + "}catch(e){}"
+            + "(function(){\n"
+            + "if(window.__ltvFilterInit){return;}\n"
+            + "window.__ltvFilterInit=1;\n"
+            + "/* ---------- 数据源：苹果CMS采集接口（原生支持 类型t/地区area/年份year 三维组合） ---------- */\n"
+            + "var SRCS=[\n"
+            + " \"https://api.ffzyapi.com/api.php/provide/vod/\",\n"
+            + " \"https://cj.lziapi.com/api.php/provide/vod/\"\n"
+            + "];\n"
+            + "var YEARS=[\"2026\",\"2025\",\"2024\",\"2023\",\"2022\",\"2021\",\"2020\",\"2019\",\"2018\",\"2017\",\"2016\"];\n"
+            + "var CONF={\n"
+            + " movie:{\n"
+            + "  \"类型\":[[\"动作\",\"6\"],[\"喜剧\",\"7\"],[\"爱情\",\"8\"],[\"科幻\",\"9\"],[\"恐怖\",\"10\"],[\"剧情\",\"11\"],[\"战争\",\"12\"],[\"纪录\",\"20\"]],\n"
+            + "  \"地区\":[\"美国\",\"韩国\",\"日本\",\"英国\",\"法国\",\"香港\",\"台湾\",\"泰国\",\"印度\",\"加拿大\",\"俄罗斯\"],\n"
+            + "  \"年份\":YEARS\n"
+            + " },\n"
+            + " tv:{\n"
+            + "  \"类型\":[[\"国产剧\",\"13\"],[\"香港剧\",\"14\"],[\"韩国剧\",\"15\"],[\"欧美剧\",\"16\"],[\"台湾剧\",\"21\"],[\"日本剧\",\"22\"],[\"海外剧\",\"23\"],[\"泰国剧\",\"24\"],[\"短剧\",\"36\"]],\n"
+            + "  \"地区\":[\"美国\",\"韩国\",\"日本\",\"英国\",\"香港\",\"台湾\",\"泰国\",\"中国大陆\"],\n"
+            + "  \"年份\":YEARS\n"
+            + " },\n"
+            + " variety:{\n"
+            + "  \"类型\":[[\"大陆综艺\",\"25\"],[\"港台综艺\",\"26\"],[\"日韩综艺\",\"27\"],[\"欧美综艺\",\"28\"]],\n"
+            + "  \"地区\":[\"中国大陆\",\"台湾\",\"香港\",\"韩国\",\"日本\",\"美国\"],\n"
+            + "  \"年份\":YEARS\n"
+            + " },\n"
+            + " anime:{\n"
+            + "  \"类型\":[[\"国产动漫\",\"29\"],[\"日韩动漫\",\"30\"],[\"欧美动漫\",\"31\"],[\"港台动漫\",\"32\"],[\"海外动漫\",\"33\"]],\n"
+            + "  \"地区\":[\"中国大陆\",\"日本\",\"韩国\",\"美国\",\"台湾\"],\n"
+            + "  \"年份\":YEARS\n"
+            + " }\n"
+            + "};\n"
+            + "var TABS=[[\"movie\",\"电影\"],[\"tv\",\"剧集\"],[\"variety\",\"综艺\"],[\"anime\",\"动漫\"]];\n"
+            + "var curType=\"movie\",curSel={},pg=1,pageCount=1,loading=false,hasMore=true,mode=\"filter\",loadCtl=null,cache={},curTotal=0,srcIdx=0,relaxed=[],lastUrl=\"\";\n"
+            + "/* ---------- 工具 ---------- */\n"
+            + "function esc(s){return String(s==null?\"\":s).replace(/&/g,\"&amp;\").replace(/</g,\"&lt;\").replace(/>/g,\"&gt;\").replace(/\\\"/g,\"&quot;\");}\n"
+            + "function videoOn(){return !!document.querySelector(\"video\");}\n"
+            + "function abortLoad(){if(loadCtl){try{loadCtl.abort();}catch(e){}}loadCtl=null;}\n"
+            + "function selOf(row){var o=curSel[row];return (o&&o.v)?o.v:\"\";}\n"
+            + "function selLabel(row){var o=curSel[row];return (o&&o.label)?o.label:\"\";}\n"
+            + "function selKey(){return curType+\"|\"+selOf(\"类型\")+\"|\"+selOf(\"地区\")+\"|\"+selOf(\"年份\")+\"|\"+relaxed.join(\"-\");}\n"
+            + "/* 组装第三方接口地址（通过 App 原生代理请求，绕开网页跨域限制） */\n"
+            + "function buildUrl(){\n"
+            + " var p=[SRCS[srcIdx]+\"?ac=videolist&pg=\"+pg];\n"
+            + " var t=selOf(\"类型\"); if(t&&relaxed.indexOf(\"类型\")<0){p.push(\"&t=\"+t);}\n"
+            + " var a=selOf(\"地区\"); if(a&&relaxed.indexOf(\"地区\")<0){p.push(\"&area=\"+encodeURIComponent(a));}\n"
+            + " var y=selOf(\"年份\"); if(y&&relaxed.indexOf(\"年份\")<0){p.push(\"&year=\"+y);}\n"
+            + " return p.join(\"\");\n"
+            + "}\n"
+            + "function proxyGet(url,sig){\n"
+            + " return fetch(\"/__ltv_api?u=\"+encodeURIComponent(url),{signal:sig,credentials:\"omit\"});\n"
+            + "}\n"
+            + "/* ---------- 悬浮「筛选」按钮（播放视频时自动隐藏） ---------- */\n"
+            + "setInterval(function(){\n"
+            + " var f=document.getElementById(\"__ltv_filter\");\n"
+            + " if(videoOn()){if(f&&f.parentNode){f.parentNode.removeChild(f);}return;}\n"
+            + " if(!document.body||f){return;}\n"
+            + " f=document.createElement(\"button\");f.id=\"__ltv_filter\";f.textContent=\"筛选\";\n"
+            + " f.style.cssText=\"position:fixed;right:14px;bottom:24px;z-index:99998;padding:6px 14px;border-radius:16px;border:1px solid rgba(255,255,255,.35);background:rgba(18,18,26,.75);color:#fff;font-size:13px;cursor:pointer;\";\n"
+            + " f.addEventListener(\"click\",function(e){e.stopPropagation();openPanel();});\n"
+            + " document.body.appendChild(f);\n"
+            + "},900);\n"
+            + "/* ---------- 面板 ---------- */\n"
+            + "function openPanel(){\n"
+            + " if(document.getElementById(\"__ltv_ovl\")){return;}\n"
+            + " var ovl=document.createElement(\"div\");ovl.id=\"__ltv_ovl\";\n"
+            + " ovl.style.cssText=\"position:fixed;inset:0;z-index:99999;background:#0f0f16;overflow-y:auto;-webkit-overflow-scrolling:touch;\";\n"
+            + " document.body.appendChild(ovl);\n"
+            + " var head=document.createElement(\"div\");\n"
+            + " head.style.cssText=\"position:sticky;top:0;background:#14141e;border-bottom:1px solid #26263a;padding:10px 12px;z-index:2;\";\n"
+            + " ovl.appendChild(head);\n"
+            + " var grid=document.createElement(\"div\");\n"
+            + " grid.style.cssText=\"display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:12px;\";\n"
+            + " ovl.appendChild(grid);\n"
+            + " var tip=document.createElement(\"div\");\n"
+            + " tip.style.cssText=\"color:#8a8aa0;font-size:12px;text-align:center;padding:14px;\";\n"
+            + " ovl.appendChild(tip);\n"
+            + " ovl.addEventListener(\"scroll\",function(){\n"
+            + "  if(mode!==\"filter\"||loading||!hasMore){return;}\n"
+            + "  if(ovl.scrollTop+ovl.clientHeight>=ovl.scrollHeight-500){pg=pg+1;loadPage(true);}\n"
+            + " });\n"
+            + " buildHead(head);buildFilters(head);resetLoad();\n"
+            + "}\n"
+            + "function buildHead(head){\n"
+            + " var r1=document.createElement(\"div\");\n"
+            + " r1.style.cssText=\"display:flex;align-items:center;gap:8px;\";\n"
+            + " var close=document.createElement(\"button\");close.textContent=\"\\u2715\";\n"
+            + " close.style.cssText=\"background:none;border:none;color:#999;font-size:20px;cursor:pointer;padding:0 4px;\";\n"
+            + " close.addEventListener(\"click\",function(){var o=document.getElementById(\"__ltv_ovl\");if(o){o.remove();}});\n"
+            + " r1.appendChild(close);\n"
+            + " var title=document.createElement(\"span\");\n"
+            + " title.textContent=\"\\uD83C\\uDFAC 影片筛选\";\n"
+            + " title.style.cssText=\"color:#fff;font-size:16px;font-weight:600;flex:1;\";\n"
+            + " r1.appendChild(title);\n"
+            + " var auto=document.createElement(\"button\");\n"
+            + " var isAuto=false;try{isAuto=localStorage.getItem(\"__ltvAutoFilter\")===\"1\";}catch(e){}\n"
+            + " auto.textContent=isAuto?\"\\u2605 启动页\":\"设为启动页\";\n"
+            + " auto.style.cssText=\"padding:4px 10px;border-radius:12px;font-size:11px;cursor:pointer;border:1px solid \"+(isAuto?\"#e91e63\":\"#333\")+\";background:\"+(isAuto?\"#e91e63\":\"#1e1e2c\")+\";color:#bbb;\";\n"
+            + " auto.addEventListener(\"click\",function(){\n"
+            + "  var on=false;\n"
+            + "  try{on=localStorage.getItem(\"__ltvAutoFilter\")===\"1\";\n"
+            + "   if(on){localStorage.removeItem(\"__ltvAutoFilter\");}else{localStorage.setItem(\"__ltvAutoFilter\",\"1\");}}catch(e){on=!on;}\n"
+            + "  auto.textContent=on?\"\\u2605 启动页\":\"设为启动页\";\n"
+            + "  auto.style.border=on?\"1px solid #e91e63\":\"1px solid #333\";\n"
+            + "  auto.style.background=on?\"#e91e63\":\"#1e1e2c\";\n"
+            + " });\n"
+            + " r1.appendChild(auto);\n"
+            + " head.appendChild(r1);\n"
+            + " buildTabs(head);\n"
+            + " var sr=document.createElement(\"div\");sr.id=\"__ltv_srow\";sr.style.cssText=\"display:flex;gap:8px;margin-top:10px;\";\n"
+            + " var inp=document.createElement(\"input\");inp.placeholder=\"搜索片名…\";\n"
+            + " inp.style.cssText=\"flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2a2a3a;background:#1e1e2c;color:#fff;font-size:13px;outline:none;\";\n"
+            + " var sb=document.createElement(\"button\");sb.textContent=\"搜索\";\n"
+            + " sb.style.cssText=\"padding:8px 16px;border-radius:8px;border:none;background:#e91e63;color:#fff;font-size:13px;cursor:pointer;\";\n"
+            + " function doSearchClick(){var q=(inp.value||\"\").trim();if(q){mode=\"search\";hasMore=false;abortLoad();searchGrid(q);}}\n"
+            + " sb.addEventListener(\"click\",doSearchClick);\n"
+            + " inp.addEventListener(\"keydown\",function(e){if(e.key===\"Enter\"){doSearchClick();}});\n"
+            + " sr.appendChild(inp);sr.appendChild(sb);head.appendChild(sr);\n"
+            + "}\n"
+            + "/* 四个分类 tab：每次切换都重绘自己，保证高亮跟随 */\n"
+            + "function buildTabs(head){\n"
+            + " var old=document.getElementById(\"__ltv_tabs\");if(old&&old.parentNode){old.parentNode.removeChild(old);}\n"
+            + " var wrap=document.createElement(\"div\");wrap.id=\"__ltv_tabs\";\n"
+            + " wrap.style.cssText=\"display:flex;gap:6px;margin-top:10px;\";\n"
+            + " TABS.forEach(function(pr){\n"
+            + "  var b=document.createElement(\"button\");b.textContent=pr[1];var on=curType===pr[0];\n"
+            + "  b.style.cssText=\"flex:1;padding:8px 4px;border-radius:8px;font-size:13px;cursor:pointer;border:none;background:\"+(on?\"#e91e63\":\"#1e1e2c\")+\";color:\"+(on?\"#fff\":\"#bbb\")+\";\";\n"
+            + "  b.addEventListener(\"click\",function(){\n"
+            + "   if(curType!==pr[0]){curType=pr[0];curSel={};relaxed=[];mode=\"filter\";buildTabs(head);buildFilters(head);resetLoad();}\n"
+            + "  });\n"
+            + "  wrap.appendChild(b);\n"
+            + " });\n"
+            + " var sr=document.getElementById(\"__ltv_srow\");\n"
+            + " if(sr){head.insertBefore(wrap,sr);}else{head.appendChild(wrap);}\n"
+            + "}\n"
+            + "/* 三行筛选：类型 / 地区 / 年份，每行单选（「全部」= 不限） */\n"
+            + "function buildFilters(head){\n"
+            + " var old=document.getElementById(\"__ltv_frows\");if(old&&old.parentNode){old.parentNode.removeChild(old);}\n"
+            + " var box=document.createElement(\"div\");box.id=\"__ltv_frows\";box.style.cssText=\"margin-top:10px;\";\n"
+            + " var conf=CONF[curType];\n"
+            + " [\"类型\",\"地区\",\"年份\"].forEach(function(rowName){\n"
+            + "  var row=document.createElement(\"div\");\n"
+            + "  row.style.cssText=\"display:flex;gap:6px;align-items:flex-start;margin:6px 0;\";\n"
+            + "  var lab=document.createElement(\"span\");lab.textContent=rowName;\n"
+            + "  lab.style.cssText=\"color:#8a8aa0;font-size:12px;min-width:34px;line-height:26px;\";row.appendChild(lab);\n"
+            + "  var wrap=document.createElement(\"div\");\n"
+            + "  wrap.style.cssText=\"display:flex;gap:6px;overflow-x:auto;white-space:nowrap;padding-bottom:2px;\";\n"
+            + "  var allOn=!selOf(rowName);\n"
+            + "  var allBtn=document.createElement(\"button\");allBtn.textContent=\"全部\";\n"
+            + "  allBtn.style.cssText=\"flex:0 0 auto;padding:4px 12px;border-radius:13px;font-size:12px;cursor:pointer;border:1px solid \"+(allOn?\"#e91e63\":\"#333\")+\";background:\"+(allOn?\"#e91e63\":\"#1e1e2c\")+\";color:\"+(allOn?\"#fff\":\"#bbb\")+\";\";\n"
+            + "  allBtn.addEventListener(\"click\",function(){delete curSel[rowName];relaxed=[];mode=\"filter\";buildFilters(head);resetLoad();});\n"
+            + "  wrap.appendChild(allBtn);\n"
+            + "  conf[rowName].forEach(function(item){\n"
+            + "   var label=item, value=\"\";\n"
+            + "   if(Object.prototype.toString.call(item)===\"[object Array]\"){label=item[0];value=item[1];}\n"
+            + "   else{value=item;}\n"
+            + "   var on=selOf(rowName)===value;\n"
+            + "   var b=document.createElement(\"button\");b.textContent=label;\n"
+            + "   b.style.cssText=\"flex:0 0 auto;padding:4px 12px;border-radius:13px;font-size:12px;cursor:pointer;border:1px solid \"+(on?\"#e91e63\":\"#333\")+\";background:\"+(on?\"#e91e63\":\"#1e1e2c\")+\";color:\"+(on?\"#fff\":\"#bbb\")+\";\";\n"
+            + "   b.addEventListener(\"click\",function(){\n"
+            + "    if(on){delete curSel[rowName];}else{curSel[rowName]={v:value,label:label};}\n"
+            + "    relaxed=[];mode=\"filter\";buildFilters(head);resetLoad();\n"
+            + "   });\n"
+            + "   wrap.appendChild(b);\n"
+            + "  });\n"
+            + "  row.appendChild(wrap);box.appendChild(row);\n"
+            + " });\n"
+            + " head.appendChild(box);\n"
+            + "}\n"
+            + "function ovlParts(){\n"
+            + " var ovl=document.getElementById(\"__ltv_ovl\");\n"
+            + " if(!ovl){return null;}\n"
+            + " var divs=ovl.children;\n"
+            + " return {grid:divs[1],tip:divs[2]};\n"
+            + "}\n"
+            + "function resetLoad(){pg=1;pageCount=1;hasMore=true;mode=\"filter\";curTotal=0;abortLoad();loadPage(false);}\n"
+            + "function renderList(grid,list){\n"
+            + " grid.innerHTML=\"\";\n"
+            + " list.forEach(function(it){grid.appendChild(makeCard(it));});\n"
+            + "}\n"
+            + "function showRetry(p,on){\n"
+            + " var btn=document.getElementById(\"__ltv_retry\");\n"
+            + " if(!on){if(btn&&btn.parentNode){btn.parentNode.removeChild(btn);}return;}\n"
+            + " if(btn){return;}\n"
+            + " btn=document.createElement(\"button\");btn.id=\"__ltv_retry\";btn.textContent=\"重试\";\n"
+            + " btn.style.cssText=\"display:block;margin:0 auto 20px;padding:8px 22px;border-radius:16px;border:1px solid #e91e63;background:#1e1e2c;color:#e91e63;font-size:13px;cursor:pointer;\";\n"
+            + " btn.addEventListener(\"click\",function(){showRetry(null,false);resetLoad();});\n"
+            + " var ovl=document.getElementById(\"__ltv_ovl\");\n"
+            + " if(ovl){ovl.appendChild(btn);}\n"
+            + "}\n"
+            + "/* 把采集接口返回的条目规范化成卡片数据 */\n"
+            + "function normList(d){\n"
+            + " var arr=(d&&d.list)||[];\n"
+            + " var out=[];\n"
+            + " for(var i=0;i<arr.length;i++){\n"
+            + "  var it=arr[i]||{};\n"
+            + "  if(!it.vod_name){continue;}\n"
+            + "  var sc=parseFloat(it.vod_douban_score||0)||parseFloat(it.vod_score||0)||0;\n"
+            + "  out.push({name:it.vod_name,pic:it.vod_pic||\"\",remark:it.vod_remarks||\"\",year:it.vod_year||\"\",score:sc>0?sc.toFixed(1):\"\",play:pickM3u8(it.vod_play_url||\"\")});\n"
+            + " }\n"
+            + " return out;\n"
+            + "}\n"
+            + "function pickM3u8(u){\n"
+            + " var m=String(u).match(/https?:\\/\\/[^\\$#\\s]+\\.m3u8[^\\$#\\s]*/i);\n"
+            + " if(m){return m[0];}\n"
+            + " m=String(u).match(/https?:\\/\\/[^\\$#\\s]+\\.(?:mp4|flv)[^\\$#\\s]*/i);\n"
+            + " return m?m[0]:\"\";\n"
+            + "}\n"
+            + "/* 空结果自动放宽：先丢「地区」，再丢「年份」，并提示 */\n"
+            + "function tryRelax(){\n"
+            + " var cands=[\"地区\",\"年份\"];\n"
+            + " for(var i=0;i<cands.length;i++){\n"
+            + "  var row=cands[i];\n"
+            + "  if(selOf(row)&&relaxed.indexOf(row)<0){relaxed.push(row);return row;}\n"
+            + " }\n"
+            + " return null;\n"
+            + "}\n"
+            + "function loadPage(append){\n"
+            + " if(loading||mode!==\"filter\"){return;}\n"
+            + " loading=true;abortLoad();showRetry(null,false);\n"
+            + " var p=ovlParts();\n"
+            + " if(!p){loading=false;return;}\n"
+            + " var url=buildUrl();\n"
+            + " if(!append&&cache[url]){\n"
+            + "  renderList(p.grid,cache[url]);\n"
+            + "  pageCount=Math.max(1,parseInt(cache[url+\"#pc\"],10)||1);\n"
+            + "  hasMore=pg<pageCount;\n"
+            + "  var reNote=relaxed.length?(\"（已忽略「\"+relaxed.join(\"」「\")+\"」）\"):\"\";\n"
+            + "  p.tip.textContent=\"共 \"+(cache[url+\"#total\"]||cache[url].length)+\" 部\"+reNote+(hasMore?\" · 上滑加载更多\":\"\");\n"
+            + "  loading=false;return;\n"
+            + " }\n"
+            + " if(!append){p.grid.innerHTML=\"\";}\n"
+            + " p.tip.textContent=\"加载中…\";\n"
+            + " var ctl=new AbortController();loadCtl=ctl;\n"
+            + " var timer=setTimeout(function(){try{ctl.abort();}catch(e){}},12000);\n"
+            + " proxyGet(url,ctl.signal)\n"
+            + "  .then(function(r){if(!r.ok){throw new Error(\"HTTP \"+r.status);}return r.json();})\n"
+            + "  .then(function(d){\n"
+            + "   clearTimeout(timer);\n"
+            + "   var list=normList(d);\n"
+            + "   if(!list.length){\n"
+            + "    var rel=tryRelax();\n"
+            + "    if(rel){p.tip.textContent=\"该组合暂无收录，已忽略「\"+rel+\"」重试…\";loading=false;setTimeout(function(){loadPage(false);},350);return;}\n"
+            + "    if(srcIdx<SRCS.length-1){\n"
+            + "     srcIdx=srcIdx+1;p.tip.textContent=\"换一个数据源重试…\";loading=false;\n"
+            + "     setTimeout(function(){loadPage(false);},350);return;\n"
+            + "    }\n"
+            + "    hasMore=false;p.tip.textContent=\"换个筛选条件试试\";loading=false;return;\n"
+            + "   }\n"
+            + "   srcIdx=0;\n"
+            + "   curTotal=parseInt(d.total,10)||list.length;\n"
+            + "   pageCount=Math.max(1,parseInt(d.pagecount,10)||1);\n"
+            + "   if(!append){\n"
+            + "    cache[url]=list;cache[url+\"#pc\"]=pageCount;cache[url+\"#total\"]=curTotal;\n"
+            + "    renderList(p.grid,list);\n"
+            + "   }else{\n"
+            + "    list.forEach(function(it){p.grid.appendChild(makeCard(it));});\n"
+            + "   }\n"
+            + "   hasMore=pg<pageCount;\n"
+            + "   var extra=relaxed.length?(\"（已忽略「\"+relaxed.join(\"」「\")+\"」）\"):\"\";\n"
+            + "   p.tip.textContent=\"共 \"+curTotal+\" 部\"+extra+(hasMore?\" · 上滑加载更多\":\"\");\n"
+            + "   loading=false;\n"
+            + "  })\n"
+            + "  .catch(function(e){\n"
+            + "   clearTimeout(timer);\n"
+            + "   loading=false;\n"
+            + "   if(e&&e.name===\"AbortError\"){return;}\n"
+            + "   if(!append&&(selOf(\"地区\")||selOf(\"年份\"))&&tryRelax()){p.tip.textContent=\"请求失败，放宽条件重试…\";setTimeout(function(){loadPage(false);},350);return;}\n"
+            + "   p.tip.textContent=\"加载失败：\"+esc(e.message||e);\n"
+            + "   showRetry(p,true);\n"
+            + "  });\n"
+            + "}\n"
+            + "function makeCard(it){\n"
+            + " var card=document.createElement(\"div\");card.style.cssText=\"cursor:pointer;\";\n"
+            + " var badge=it.remark?(\"<span style=\\\"position:absolute;left:4px;top:4px;max-width:88%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;background:rgba(233,30,99,.88);color:#fff;font-size:10px;padding:1px 5px;border-radius:4px\\\">\"+esc(it.remark)+\"</span>\"):\"\";\n"
+            + " var rate=(it.score||it.year)?(\"<span style=\\\"position:absolute;right:4px;top:4px;background:rgba(0,0,0,.72);color:#f5c518;font-size:10px;padding:1px 5px;border-radius:4px\\\">\"+(it.score?(\"\\\\u2605\"+esc(it.score)):esc(it.year))+\"</span>\"):\"\";\n"
+            + " card.innerHTML=\"<div style=\\\"position:relative\\\"><img src=\\\"\"+esc(it.pic)+\"\\\" loading=\\\"lazy\\\" onerror=\\\"this.style.opacity=0.15\\\" style=\\\"width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:8px;background:#222\\\">\"+badge+rate+\"</div>\"\n"
+            + "  +\"<div style=\\\"color:#ddd;font-size:12px;margin-top:4px;height:30px;line-height:15px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden\\\">\"+esc(it.name)+\"</div>\";\n"
+            + " var pressTimer=null,longFired=false;\n"
+            + " card.addEventListener(\"touchstart\",function(){longFired=false;pressTimer=setTimeout(function(){longFired=true;if(it.play){try{window.AndroidBridge.castDirect(it.play);}catch(e){}}},650);},{passive:true});\n"
+            + " card.addEventListener(\"touchend\",function(){if(pressTimer){clearTimeout(pressTimer);}});\n"
+            + " card.addEventListener(\"touchmove\",function(){if(pressTimer){clearTimeout(pressTimer);}});\n"
+            + " card.addEventListener(\"click\",function(){if(longFired){return;}playTitle(it.name);});\n"
+            + " return card;\n"
+            + "}\n"
+            + "/* ---------- 站内搜索并播放（沿用网站自己的片源，保证能播） ---------- */\n"
+            + "function searchGrid(q){\n"
+            + " var p=ovlParts();if(!p){return;}\n"
+            + " p.grid.innerHTML=\"\";p.tip.textContent=\"搜索中…\";\n"
+            + " fetch(\"/api/search\",{method:\"POST\",credentials:\"include\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({query:q})})\n"
+            + " .then(function(r){return r.json();}).then(function(d){\n"
+            + "  var list=(d&&(d.regular_results||d.results||d.list||d.data))||[];\n"
+            + "  if(!Array.isArray(list)){list=[];}\n"
+            + "  if(!list.length){p.tip.textContent=\"未找到「\"+q+\"」的片源\";return;}\n"
+            + "  p.tip.textContent=\"找到 \"+list.length+\" 个结果\";\n"
+            + "  list.forEach(function(it){\n"
+            + "   var src=it.source||it.sourceKey||\"\";var id=it.vod_id||it.id||\"\";\n"
+            + "   var t=it.vod_name||it.title||q;\n"
+            + "   var img=it.vod_pic||it.pic||it.cover||\"\";\n"
+            + "   var sn=it.source_name||\"\";\n"
+            + "   var card=document.createElement(\"div\");card.style.cssText=\"cursor:pointer;\";\n"
+            + "   card.innerHTML=\"<div style=\\\"position:relative\\\"><img src=\\\"\"+esc(img)+\"\\\" loading=\\\"lazy\\\" style=\\\"width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:8px;background:#222\\\">\"\n"
+            + "    +(sn?(\"<span style=\\\"position:absolute;left:4px;top:4px;background:rgba(233,30,99,.85);color:#fff;font-size:10px;padding:1px 5px;border-radius:4px\\\">\"+esc(sn)+\"</span>\"):\"\")+\"</div>\"\n"
+            + "    +\"<div style=\\\"color:#ddd;font-size:12px;margin-top:4px;height:30px;line-height:15px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden\\\">\"+esc(t)+\"</div>\";\n"
+            + "   card.addEventListener(\"click\",function(){if(src&&id){watch(src,id,t);}});\n"
+            + "   p.grid.appendChild(card);\n"
+            + "  });\n"
+            + " }).catch(function(e){p.tip.textContent=\"搜索失败：\"+esc(e.message||e);});\n"
+            + "}\n"
+            + "function playTitle(title){\n"
+            + " if(!title){return;}\n"
+            + " var p=ovlParts();\n"
+            + " if(p){p.tip.textContent=\"正在找片源：\"+title;}\n"
+            + " fetch(\"/api/search\",{method:\"POST\",credentials:\"include\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({query:title})})\n"
+            + " .then(function(r){return r.json();}).then(function(d){\n"
+            + "  var list=(d&&(d.regular_results||d.results||d.list||d.data))||[];\n"
+            + "  if(!Array.isArray(list)){list=[];}\n"
+            + "  var hit=null;\n"
+            + "  for(var i=0;i<list.length;i++){\n"
+            + "   var it=list[i];\n"
+            + "   if((it.source||it.sourceKey||\"\")&&(it.vod_id||it.id||\"\")){hit=it;break;}\n"
+            + "  }\n"
+            + "  if(!hit){if(p){p.tip.textContent=\"站内没找到「\"+title+\"」，可长按卡片直接投屏\";}return;}\n"
+            + "  watch(hit.source||hit.sourceKey||\"\",hit.vod_id||hit.id||\"\",hit.vod_name||hit.title||title);\n"
+            + " }).catch(function(e){if(p){p.tip.textContent=\"搜索失败：\"+esc(e.message||e);}});\n"
+            + "}\n"
+            + "function watch(src,id,t){\n"
+            + " var ovl=document.getElementById(\"__ltv_ovl\");if(ovl){ovl.remove();}\n"
+            + " location.href=\"/watch?source=\"+encodeURIComponent(src)+\"&id=\"+encodeURIComponent(id)+\"&title=\"+encodeURIComponent(t);\n"
+            + "}\n"
+            + "/* ---------- 启动页 / 首页推荐源修正（沿用原逻辑） ---------- */\n"
+            + "try{if(localStorage.getItem(\"__ltvAutoFilter\")===\"1\"&&!videoOn()&&(location.pathname===\"/\"||location.pathname===\"/index.html\")){openPanel();}}catch(e){}\n"
+            + "try{\n"
+            + " var isHome=(location.pathname===\"/\"||location.pathname===\"/index.html\");\n"
+            + " var tries=parseInt(sessionStorage.getItem(\"__ltvHomeFix\")||\"0\",10);\n"
+            + " if(isHome&&tries<2){\n"
+            + "  var raw=localStorage.getItem(\"libretv-settings\");\n"
+            + "  var obj=raw?JSON.parse(raw):null;\n"
+            + "  var st=obj&&obj.state?obj.state:null;\n"
+            + "  if(st&&st.recommendSource&&st.recommendSource!==\"hot-list\"){\n"
+            + "   st.recommendSource=\"hot-list\";st.recommendSourceTouched=true;\n"
+            + "   localStorage.setItem(\"libretv-settings\",JSON.stringify(obj));\n"
+            + "   sessionStorage.setItem(\"__ltvHomeFix\",String(tries+1));\n"
+            + "   location.reload();\n"
+            + "  }else{sessionStorage.setItem(\"__ltvHomeFix\",\"done\");}\n"
+            + " }\n"
+            + "}catch(e){}\n"
             + "})()";
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -950,6 +1027,16 @@ public class MainActivity extends Activity {
                 String u = request.getUrl().toString();
                 if (isMediaUrl(u)) {
                     lastMediaUrl = u;
+                }
+                // 站内代理：页面里的 /__ltv_api?u=<第三方接口地址> 由原生层代请求，绕开网页跨域限制
+                try {
+                    if (u.contains("/__ltv_api")) {
+                        String target = request.getUrl().getQueryParameter("u");
+                        if (target != null && target.length() > 0) {
+                            return proxyFetch(target);
+                        }
+                    }
+                } catch (Exception ignored) {
                 }
                 return null;
             }
@@ -1312,77 +1399,22 @@ public class MainActivity extends Activity {
             });
         }
 
-        /**
-         * 筛选页多标签推荐：网页 JS 调 AndroidBridge.doubanFetch(kind,tags,start,limit,seq)，
-         * 原生线程直连豆瓣 rexxar 接口（绕过 WebView CORS），结果通过 window.__ltvRexxCb(seq,ok,json) 回调。
-         */
+        /** 筛选卡片长按：把采集接口给的 m3u8 直链直接投到电视（走原生 DLNA，无需站内片源） */
         @JavascriptInterface
-        public void doubanFetch(String kind, String tags, String start, String limit, final String seq) {
-            final String k = "tv".equals(kind) ? "tv" : "movie";
-            final String t = tags == null ? "" : tags;
-            final String st = start == null ? "0" : start;
-            final String lm = limit == null ? "20" : limit;
-            new Thread(new Runnable() {
+        public void castDirect(final String url) {
+            if (url == null || url.length() == 0) {
+                return;
+            }
+            runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
-                    final String json = doubanRexxar(k, t, st, lm);
-                    final boolean ok = json != null;
-                    String payload = ok ? json : "null";
-                    String sq = (seq == null || seq.length() == 0) ? "0" : seq;
-                    final String js = "window.__ltvRexxCb(" + sq + "," + ok + "," + payload + ");";
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            if (web != null) {
-                                web.evaluateJavascript(js, null);
-                            }
-                        }
-                    });
+                    if (isMediaUrl(url)) {
+                        showDevicePicker(url);
+                    } else {
+                        castVideo(url);
+                    }
                 }
-            }).start();
-        }
-    }
-
-    /** 原生直连豆瓣 rexxar 多标签推荐接口（手机 UA + Referer，无需登录；失败返回 null） */
-    private static String doubanRexxar(String kind, String tags, String start, String limit) {
-        HttpURLConnection conn = null;
-        try {
-            StringBuilder sb = new StringBuilder("https://m.douban.com/rexxar/api/v2/");
-            sb.append(kind).append("/recommend?start=").append(start)
-              .append("&limit=").append(limit);
-            if (tags.length() > 0) {
-                sb.append("&tags=").append(URLEncoder.encode(tags, "UTF-8"));
-            }
-            conn = (HttpURLConnection) new URL(sb.toString()).openConnection();
-            conn.setConnectTimeout(8000);
-            conn.setReadTimeout(8000);
-            conn.setRequestProperty("User-Agent",
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15"
-                    + " (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1");
-            conn.setRequestProperty("Referer", "https://m.douban.com/" + kind + "/");
-            int code = conn.getResponseCode();
-            if (code != 200) {
-                return null;
-            }
-            BufferedReader br = new BufferedReader(
-                    new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8));
-            StringBuilder out = new StringBuilder();
-            char[] buf = new char[4096];
-            int n;
-            while ((n = br.read(buf)) != -1) {
-                out.append(buf, 0, n);
-            }
-            br.close();
-            return out.toString();
-        } catch (Exception e) {
-            return null;
-        } finally {
-            if (conn != null) {
-                try {
-                    conn.disconnect();
-                } catch (Exception ignored) {
-                }
-            }
+            });
         }
     }
 
@@ -1406,6 +1438,81 @@ public class MainActivity extends Activity {
         String u = url.toLowerCase();
         return u.contains(".m3u8") || u.contains(".mpd") || u.contains(".flv")
                 || u.contains(".mp4") || u.contains("/m3u8");
+    }
+
+    /**
+     * 站内代理：原生代请求第三方接口（影视采集站等），把结果以 JSON 返回给页面。
+     * 页面只需 fetch('/__ltv_api?u=' + encodeURIComponent(目标地址))，不受浏览器同源策略限制。
+     */
+    private static WebResourceResponse proxyFetch(String target) {
+        if (!target.startsWith("http://") && !target.startsWith("https://")) {
+            return jsonResponse(400, "{\"error\":\"bad url\"}");
+        }
+        HttpURLConnection conn = null;
+        try {
+            conn = (HttpURLConnection) new URL(target).openConnection();
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(9000);
+            conn.setRequestProperty("User-Agent", PROXY_UA);
+            conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+            if (target.contains("douban.com")) {
+                conn.setRequestProperty("Referer", "https://m.douban.com/");
+            }
+            int code = conn.getResponseCode();
+            InputStream in = (code >= 400) ? conn.getErrorStream() : conn.getInputStream();
+            byte[] data = readAll(in);
+            String text = new String(data, StandardCharsets.UTF_8);
+            if (text.length() == 0) {
+                text = "{\"error\":\"empty\",\"code\":" + code + "}";
+            }
+            return jsonResponse(code, text);
+        } catch (Exception e) {
+            return jsonResponse(502, "{\"error\":\"" + e.getClass().getSimpleName() + "\"}");
+        } finally {
+            if (conn != null) {
+                try {
+                    conn.disconnect();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private static WebResourceResponse jsonResponse(int code, String text) {
+        try {
+            byte[] body = text.getBytes(StandardCharsets.UTF_8);
+            Map<String, String> headers = new HashMap<String, String>();
+            headers.put("Access-Control-Allow-Origin", "*");
+            headers.put("Cache-Control", "no-store");
+            headers.put("Content-Type", "application/json; charset=utf-8");
+            WebResourceResponse resp = new WebResourceResponse("application/json", "utf-8",
+                    new ByteArrayInputStream(body));
+            resp.setStatusCode(code > 0 ? code : 502);
+            resp.setReasonPhrase(code > 0 ? "OK" : "ERR");
+            resp.setResponseHeaders(headers);
+            return resp;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static byte[] readAll(InputStream in) throws Exception {
+        if (in == null) {
+            return new byte[0];
+        }
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        int total = 0;
+        while ((n = in.read(buf)) != -1) {
+            total += n;
+            if (total > 4 * 1024 * 1024) {
+                break;
+            }
+            bos.write(buf, 0, n);
+        }
+        in.close();
+        return bos.toByteArray();
     }
 
     /** 一键跳转系统投屏设置页（各品牌 ROM 都会映射到各自的投屏/多屏互动页面） */
