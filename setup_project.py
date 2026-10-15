@@ -85,8 +85,8 @@ android {
         applicationId "__PKG__"
         minSdk 26          // Android 8.0（自适应图标需要 26+）
         targetSdk 34
-        versionCode 3
-        versionName "1.2.0"
+        versionCode 5
+        versionName "1.3.0"
     }
 
     signingConfigs {
@@ -151,7 +151,7 @@ STRINGS_XML = """<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">LibreTV 投屏版</string>
     <string name="default_server_url">__DEFAULT_URL__</string>
-    <string name="help_text">直连投屏流程：\\n1. 手机和电视连同一个 WiFi；\\n2. 在本 App 播放视频，播放器控制条右侧会出现「投屏」按钮；\\n3. 点「投屏」→ 自动搜索局域网电视（海信 / 小米 / TCL / 当贝等 DLNA 设备）→ 选中电视即开始播放，无需任何第三方软件。\\n\\n说明：\\n· 长按「投屏」按钮可打开功能菜单（切换服务器 / 横竖屏 / 清缓存等）；\\n· 搜不到电视时，确认电视已开启「DLNA / 多屏互动 / 投屏」开关（各品牌叫法不同）；\\n· 也可以选「用其他应用播放」，交给 VLC / Web Video Caster；\\n· 投屏开始后可锁屏或退出本 App，电视独立播放。\\n\\n· 投屏时手机和电视请勿开热点隔离或访客网络。</string>
+    <string name="help_text">直连投屏流程：\\n1. 手机和电视连同一个 WiFi；\\n2. 在本 App 播放视频，播放器控制条右侧会出现「投屏」按钮；\\n3. 点「投屏」→ 自动搜索局域网电视（海信 / 小米 / TCL / 当贝等 DLNA 设备）→ 选中电视即开始播放，无需任何第三方软件。\\n\\n说明：\\n· 长按「投屏」按钮可打开功能菜单（切换服务器 / 横竖屏 / 清缓存等）；\\n· 搜不到电视时，确认电视已开启「DLNA / 多屏互动 / 投屏」开关（各品牌叫法不同）；\\n· 也可以选「用其他应用播放」，交给 VLC / Web Video Caster；\\n· 投屏开始后可锁屏或退出本 App，电视独立播放。\\n\\n· 投屏时手机和电视请勿开热点隔离或访客网络。\\n\\n影片筛选：\\n· 非播放页右下角有「筛选」悬浮键 → 选电影/剧集 + 类型/地区/年份 → 点海报直接搜片源播放；\\n· 筛选使用本站豆瓣接口，若为空请先在本站登录。</string>
 </resources>
 """
 
@@ -220,6 +220,7 @@ import android.os.Bundle;
 import android.util.Xml;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -269,6 +270,10 @@ public class MainActivity extends Activity {
     private String activeCastControlUrl;
     private WifiManager.MulticastLock multicastLock;
 
+    // ---- 全屏时保存的原状态栏颜色（退出时还原） ----
+    private int savedStatusBarColor = Integer.MIN_VALUE;
+    private int savedNavBarColor = Integer.MIN_VALUE;
+
     /** 从页面里抓当前视频的真实直链（ArtPlayer / hls.js / 原生 video 逐级尝试） */
     private static final String JS_EXTRACT_VIDEO =
             "(function(){function http(u){return (u && /^https?:/i.test(u)) ? u : '';}"
@@ -278,7 +283,7 @@ public class MainActivity extends Activity {
             + "var s=document.querySelector('video source');if(s){var su=http(s.src);if(su)return su;}}catch(e){}"
             + "return '';})()";
 
-    /** 注入网页的「投屏」按钮：只有视频出现时才有；ArtPlayer 挂控制条右侧，通用场景挂在视频容器右上角 */
+    /** 注入网页的「投屏」按钮：只有视频出现时才有；绝对定位在播放器容器右下（控制条上方），横竖屏自动跟随 */
     private static final String JS_INJECT_BUTTON =
             "(function(){"
             + "if(window.__ltvCastTimer){return;}"
@@ -286,13 +291,11 @@ public class MainActivity extends Activity {
             + "var v=document.querySelector('video');"
             + "var btn=document.getElementById('__ltv_cast');"
             + "if(!v){if(btn&&btn.parentNode){btn.parentNode.removeChild(btn);}return;}"
-            + "var host=document.querySelector('.art-controls-right')||document.querySelector('.art-controls');"
-            + "var floating=true;"
-            + "if(host){floating=false;}else{host=v.parentElement||document.body;}"
+            + "var host=document.querySelector('.art-video-player')||v.parentElement||document.body;"
             + "if(!btn){"
             + "btn=document.createElement('button');"
             + "btn.id='__ltv_cast';btn.textContent='投屏';"
-            + "btn.__base='padding:4px 10px;margin-left:6px;border-radius:4px;border:1px solid rgba(255,255,255,.35);background:rgba(0,0,0,.45);color:#fff;font-size:12px;line-height:1.4;cursor:pointer;';"
+            + "btn.__base='padding:5px 12px;border-radius:14px;border:1px solid rgba(255,255,255,.4);background:rgba(0,0,0,.55);color:#fff;font-size:12px;line-height:1.4;cursor:pointer;';"
             + "var pressT=null,moved=false,px=0,py=0;"
             + "btn.addEventListener('touchstart',function(e){e.stopPropagation();var t=e.touches[0];px=t.clientX;py=t.clientY;moved=false;"
             + "pressT=setTimeout(function(){pressT=null;try{window.AndroidBridge.openMenu();}catch(err){}},650);},{passive:true});"
@@ -304,9 +307,118 @@ public class MainActivity extends Activity {
             + "}"
             + "if(btn.parentNode!==host){"
             + "host.appendChild(btn);"
-            + "btn.style.cssText=btn.__base+(floating?'position:absolute;right:12px;bottom:64px;z-index:99999;':'z-index:9999;');"
+            + "if(getComputedStyle(host).position==='static'){host.style.position='relative';}"
+            + "btn.style.cssText=btn.__base+'position:absolute;right:10px;bottom:58px;z-index:99999;';"
             + "}"
             + "}catch(e){}},900);})()";
+
+    /** 注入网页的「筛选」功能：参考老版 LibreTV 安卓 app 的豆瓣标签筛选。
+     *  仅在非播放页显示筛选键；面板内分类别/标签/年份，点海报自动搜片源并跳播放页。 */
+    private static final String JS_INJECT_FILTER =
+            "(function(){"
+            + "if(window.__ltvFilterInit){return;}"
+            + "window.__ltvFilterInit=1;"
+            + "var MOVIE=['热门','最新','经典','豆瓣高分','冷门佳片','华语','欧美','韩国','日本','动作','喜剧','爱情','科幻','悬疑','恐怖','治愈','动画'];"
+            + "var TV=['热门','美剧','英剧','韩剧','日剧','国产剧','港剧','日本动画','综艺','纪录片'];"
+            + "var YEARS=['热门','2026','2025','2024','2023','2022','2021','2020'];"
+            + "var curType='movie',curTag='热门';"
+            + "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}"
+            + "setInterval(function(){"
+            + "var f=document.getElementById('__ltv_filter');"
+            + "if(document.querySelector('video')){if(f&&f.parentNode){f.parentNode.removeChild(f);}return;}"
+            + "if(!document.body||f){return;}"
+            + "f=document.createElement('button');f.id='__ltv_filter';f.textContent='筛选';"
+            + "f.style.cssText='position:fixed;right:14px;bottom:24px;z-index:99998;padding:6px 14px;border-radius:16px;border:1px solid rgba(255,255,255,.35);background:rgba(18,18,26,.75);color:#fff;font-size:13px;cursor:pointer;';"
+            + "f.addEventListener('click',function(e){e.stopPropagation();openPanel();});"
+            + "document.body.appendChild(f);"
+            + "},900);"
+            + "function openPanel(){"
+            + "if(document.getElementById('__ltv_ovl')){return;}"
+            + "var ovl=document.createElement('div');ovl.id='__ltv_ovl';"
+            + "ovl.style.cssText='position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.8);overflow-y:auto;padding:14px;';"
+            + "var panel=document.createElement('div');"
+            + "panel.style.cssText='max-width:860px;margin:0 auto;background:#141420;border:1px solid #2a2a3a;border-radius:12px;padding:14px;';"
+            + "ovl.appendChild(panel);document.body.appendChild(ovl);"
+            + "ovl.addEventListener('click',function(e){if(e.target===ovl){ovl.remove();}});"
+            + "render(panel);"
+            + "}"
+            + "function chipRow(label,arr,active,onClick){"
+            + "var row=document.createElement('div');"
+            + "row.style.cssText='margin:6px 0;display:flex;flex-wrap:wrap;gap:6px;align-items:center;';"
+            + "var lab=document.createElement('span');lab.textContent=label;"
+            + "lab.style.cssText='color:#8a8aa0;font-size:12px;min-width:34px;';row.appendChild(lab);"
+            + "arr.forEach(function(t){"
+            + "var b=document.createElement('button');b.textContent=t;var on=(t===active);"
+            + "b.style.cssText='padding:4px 10px;border-radius:12px;font-size:12px;cursor:pointer;border:1px solid '+(on?'#e91e63':'#333')+';background:'+(on?'#e91e63':'#1e1e2c')+';color:'+(on?'#fff':'#bbb')+';';"
+            + "b.addEventListener('click',function(){onClick(t);});row.appendChild(b);"
+            + "});return row;"
+            + "}"
+            + "function render(panel){"
+            + "panel.innerHTML='';"
+            + "var head=document.createElement('div');"
+            + "head.style.cssText='display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;';"
+            + "head.innerHTML='<span style=\"color:#fff;font-size:16px;font-weight:600\">\uD83C\uDFAC 筛选 · 豆瓣精选</span>';"
+            + "var close=document.createElement('button');close.textContent='\\u2715';"
+            + "close.style.cssText='background:none;border:none;color:#999;font-size:18px;cursor:pointer;';"
+            + "close.addEventListener('click',function(){var o=document.getElementById('__ltv_ovl');if(o){o.remove();}});"
+            + "head.appendChild(close);panel.appendChild(head);"
+            + "var tabs=document.createElement('div');tabs.style.cssText='display:flex;gap:8px;margin-bottom:4px;';"
+            + "[['movie','电影'],['tv','剧集']].forEach(function(pr){"
+            + "var b=document.createElement('button');b.textContent=pr[1];var on=curType===pr[0];"
+            + "b.style.cssText='flex:1;padding:8px;border-radius:8px;font-size:14px;cursor:pointer;border:none;background:'+(on?'#e91e63':'#1e1e2c')+';color:'+(on?'#fff':'#bbb')+';';"
+            + "b.addEventListener('click',function(){curType=pr[0];curTag='热门';render(panel);});"
+            + "tabs.appendChild(b);"
+            + "});"
+            + "panel.appendChild(tabs);"
+            + "var tags=curType==='movie'?MOVIE:TV;"
+            + "panel.appendChild(chipRow('类型',tags,tags.indexOf(curTag)>=0?curTag:'热门',function(t){curTag=t;render(panel);}));"
+            + "panel.appendChild(chipRow('年份',YEARS,YEARS.indexOf(curTag)>=0?curTag:null,function(t){curTag=t;render(panel);}));"
+            + "var grid=document.createElement('div');"
+            + "grid.style.cssText='display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;margin-top:10px;';"
+            + "panel.appendChild(grid);loadGrid(grid);"
+            + "}"
+            + "function loadGrid(grid){"
+            + "grid.innerHTML='<div style=\"color:#8a8aa0;padding:26px;grid-column:1/-1;text-align:center\">加载中…</div>';"
+            + "var url='/api/douban?type='+encodeURIComponent(curType)+'&tag='+encodeURIComponent(curTag)+'&pageStart=0&pageSize=24';"
+            + "fetch(url,{credentials:'include'}).then(function(r){return r.json();}).then(function(d){"
+            + "var list=(d&&(d.list||d.subjects||d.items||d.data))||[];"
+            + "if(!Array.isArray(list)||!list.length){"
+            + "grid.innerHTML='<div style=\"color:#8a8aa0;padding:26px;grid-column:1/-1;text-align:center\">暂无内容（若一直为空，请先在本站登录）</div>';return;}"
+            + "grid.innerHTML='';"
+            + "list.forEach(function(it){"
+            + "var t=it.title||it.name||'';"
+            + "var img=it.poster||it.cover||it.img||'';"
+            + "if(img){img=img.replace(/img\\d+\\.doubanio\\.com/g,'img.doubanio.cmliussss.net');}"
+            + "var rate=it.rate||it.rating||'';"
+            + "var card=document.createElement('div');card.style.cssText='cursor:pointer;';"
+            + "card.innerHTML='<div style=\"position:relative\"><img src=\"'+esc(img)+'\" loading=\"lazy\" style=\"width:100%;aspect-ratio:2/3;object-fit:cover;border-radius:8px;background:#222\">'"
+            + "+(rate?'<span style=\"position:absolute;right:4px;top:4px;background:rgba(0,0,0,.7);color:#f5c518;font-size:11px;padding:1px 4px;border-radius:4px\">\\u2605'+esc(rate)+'</span>':'')+'</div>'"
+            + "+'<div style=\"color:#ddd;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\">'+esc(t)+'</div>';"
+            + "card.addEventListener('click',function(){playTitle(t);});"
+            + "grid.appendChild(card);"
+            + "});"
+            + "}).catch(function(e){"
+            + "grid.innerHTML='<div style=\"color:#f88;padding:26px;grid-column:1/-1;text-align:center\">加载失败：'+esc(e.message||e)+'</div>';});"
+            + "}"
+            + "function playTitle(title){"
+            + "if(!title){return;}"
+            + "fetch('/api/search',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:title})})"
+            + ".then(function(r){return r.json();}).then(function(d){"
+            + "var list=(d&&(d.regular_results||d.results||d.list||d.data))||[];"
+            + "if(!Array.isArray(list)){list=[];}"
+            + "var hit=null;"
+            + "for(var i=0;i<list.length;i++){"
+            + "var it=list[i];var src=it.source||it.sourceKey||'';var id=it.vod_id||it.id||'';"
+            + "if(src&&id){hit=it;break;}"
+            + "}"
+            + "if(!hit){alert('未找到可播放的片源：'+title);return;}"
+            + "var src=hit.source||hit.sourceKey||'';var id=hit.vod_id||hit.id||'';"
+            + "var t=hit.vod_name||hit.title||title;"
+            + "var ov=document.getElementById('__ltv_ovl');if(ov){ov.remove();}"
+            + "location.href='/watch?source='+encodeURIComponent(src)+'&id='+encodeURIComponent(id)+'&title='+encodeURIComponent(t);"
+            + "}).catch(function(e){alert('搜索失败：'+(e.message||e));});"
+            + "}"
+            + "})()";
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -348,8 +460,9 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                // 每次页面加载完，注入跟随视频出现的「投屏」按钮
+                // 每次页面加载完：注入跟随视频出现的「投屏」按钮 + 「筛选」功能
                 view.evaluateJavascript(JS_INJECT_BUTTON, null);
+                view.evaluateJavascript(JS_INJECT_FILTER, null);
             }
         });
         web.addJavascriptInterface(new Bridge(), "AndroidBridge");
@@ -784,9 +897,16 @@ public class MainActivity extends Activity {
             customCb = null;
         }
         web.setVisibility(View.VISIBLE);
-        // 退出全屏后恢复跟随系统自动旋转
+        // 退出全屏后恢复跟随系统自动旋转，并还原状态栏
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        if (savedStatusBarColor != Integer.MIN_VALUE) {
+            getWindow().setStatusBarColor(savedStatusBarColor);
+            getWindow().setNavigationBarColor(savedNavBarColor);
+            savedStatusBarColor = Integer.MIN_VALUE;
+            savedNavBarColor = Integer.MIN_VALUE;
+        }
     }
 
     /** 手动横竖屏切换（网页自身 CSS 全屏无法被系统感知时的兜底） */
@@ -802,11 +922,21 @@ public class MainActivity extends Activity {
     }
 
     private void enterImmersive() {
+        // 强制全屏窗口 + 状态栏/导航栏染黑，压掉 HTML5 全屏时顶部露出的白条
+        if (savedStatusBarColor == Integer.MIN_VALUE) {
+            savedStatusBarColor = getWindow().getStatusBarColor();
+            savedNavBarColor = getWindow().getNavigationBarColor();
+        }
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().setStatusBarColor(android.graphics.Color.BLACK);
+        getWindow().setNavigationBarColor(android.graphics.Color.BLACK);
         getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_FULLSCREEN
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
     }
 
     private void toast(String msg) {
