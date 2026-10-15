@@ -85,8 +85,8 @@ android {
         applicationId "__PKG__"
         minSdk 26          // Android 8.0（自适应图标需要 26+）
         targetSdk 34
-        versionCode 10
-        versionName "1.6.0"
+        versionCode 11
+        versionName "1.6.1"
     }
 
     signingConfigs {
@@ -607,6 +607,19 @@ public class MainActivity extends Activity {
             + "});"
             + "buildHead(head);buildFilters(head);resetLoad();"
             + "}"
+            + "function buildTabs(head){"
+            + "var old=document.getElementById('__ltv_tabs');if(old&&old.parentNode){old.parentNode.removeChild(old);}"
+            + "var tabs=document.createElement('div');tabs.id='__ltv_tabs';"
+            + "tabs.style.cssText='display:flex;gap:8px;margin-top:10px;';"
+            + "[['movie','电影'],['tv','剧集']].forEach(function(pr){"
+            + "var b=document.createElement('button');b.textContent=pr[1];var on=curType===pr[0];"
+            + "b.style.cssText='flex:1;padding:9px;border-radius:8px;font-size:14px;cursor:pointer;border:none;background:'+(on?'#e91e63':'#1e1e2c')+';color:'+(on?'#fff':'#bbb')+';';"
+            + "b.addEventListener('click',function(){if(curType!==pr[0]){curType=pr[0];curSel={};mode='filter';buildTabs(head);buildFilters(head);resetLoad();}});"
+            + "tabs.appendChild(b);"
+            + "});"
+            + "var sr=document.getElementById('__ltv_srow');"
+            + "if(sr){head.insertBefore(tabs,sr);}else{head.appendChild(tabs);}"
+            + "}"
             + "function buildHead(head){"
             + "var r1=document.createElement('div');"
             + "r1.style.cssText='display:flex;align-items:center;gap:8px;';"
@@ -631,15 +644,8 @@ public class MainActivity extends Activity {
             + "auto.style.background=on?'#e91e63':'#1e1e2c';"
             + "});"
             + "r1.appendChild(auto);head.appendChild(r1);"
-            + "var tabs=document.createElement('div');tabs.style.cssText='display:flex;gap:8px;margin-top:10px;';"
-            + "[['movie','电影'],['tv','剧集']].forEach(function(pr){"
-            + "var b=document.createElement('button');b.textContent=pr[1];var on=curType===pr[0];"
-            + "b.style.cssText='flex:1;padding:9px;border-radius:8px;font-size:14px;cursor:pointer;border:none;background:'+(on?'#e91e63':'#1e1e2c')+';color:'+(on?'#fff':'#bbb')+';';"
-            + "b.addEventListener('click',function(){if(curType!==pr[0]){curType=pr[0];curSel={};mode='filter';buildFilters(head);resetLoad();}});"
-            + "tabs.appendChild(b);"
-            + "});"
-            + "head.appendChild(tabs);"
-            + "var sr=document.createElement('div');sr.style.cssText='display:flex;gap:8px;margin-top:10px;';"
+            + "buildTabs(head);"
+            + "var sr=document.createElement('div');sr.id='__ltv_srow';sr.style.cssText='display:flex;gap:8px;margin-top:10px;';"
             + "var inp=document.createElement('input');inp.placeholder='搜索片名…';"
             + "inp.style.cssText='flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2a2a3a;background:#1e1e2c;color:#fff;font-size:13px;outline:none;';"
             + "var sb=document.createElement('button');sb.textContent='搜索';"
@@ -749,7 +755,8 @@ public class MainActivity extends Activity {
             + "p.tip.textContent='加载中…';"
             + "pendAppend=append;pendCk=ck;"
             + "var seq=rexSeq;"
-            + "try{window.AndroidBridge.doubanFetch(curType,tags,String(pageStart),'20',String(seq));}"
+            + "try{window.AndroidBridge.doubanFetch(curType,tags,String(pageStart),'20',String(seq));"
+            + "setTimeout(function(){if(loading&&seq===rexSeq){loading=false;}},15000);}"
             + "catch(e){rexSeq--;loadDoubanFallback(append,ck,p);}"
             + "}"
             + "function makeCard(it){"
